@@ -1,0 +1,6 @@
+{
+  "name": "Packshot Studio",
+  "description": "AI ecommerce product photography studio generating marketplace-ready packshots, hero scenes, and macro textures.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
