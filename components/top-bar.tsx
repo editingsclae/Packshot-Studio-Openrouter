@@ -4,7 +4,7 @@ import React from 'react';
 import { Command, Moon, Sun } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
-export type StudioTab = 'generate' | 'library' | 'settings';
+export type StudioTab = 'generate' | 'library' | 'usage' | 'settings';
 
 interface TopBarProps {
   activeTab: StudioTab;
@@ -15,9 +15,20 @@ interface TopBarProps {
   libraryCount: number;
 }
 
-const TAB_LABELS: { id: StudioTab; label: string; breadcrumb: string }[] = [
+const TAB_LABELS: {
+  id: StudioTab;
+  label: string;
+  shortLabel?: string;
+  breadcrumb: string;
+}[] = [
   { id: 'generate', label: 'Generate', breadcrumb: 'New generation' },
   { id: 'library', label: 'Library', breadcrumb: 'Library' },
+  {
+    id: 'usage',
+    label: 'Usage History',
+    shortLabel: 'Usage',
+    breadcrumb: 'Usage History',
+  },
   { id: 'settings', label: 'Settings', breadcrumb: 'Settings' },
 ];
 
@@ -107,7 +118,14 @@ export function TopBar({
                     : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]'
                 )}
               >
-                <span>{tab.label}</span>
+                {tab.shortLabel ? (
+                  <>
+                    <span className="sm:hidden">{tab.shortLabel}</span>
+                    <span className="hidden sm:inline">{tab.label}</span>
+                  </>
+                ) : (
+                  <span>{tab.label}</span>
+                )}
                 {tab.id === 'library' && libraryCount > 0 ? (
                   <span className="font-mono text-[11px] tabular-nums text-[var(--muted-foreground)]">
                     {libraryCount}

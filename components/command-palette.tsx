@@ -4,6 +4,7 @@ import React from 'react';
 import { Command } from 'cmdk';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import {
+  BarChart3,
   Camera,
   FolderOpen,
   Moon,
@@ -93,6 +94,14 @@ export function CommandPalette({
                 >
                   <FolderOpen className="h-3.5 w-3.5 text-[var(--muted-foreground)]" />
                   <span>Go to Library</span>
+                </Command.Item>
+                <Command.Item
+                  value="Usage history spending cost analytics chart"
+                  onSelect={() => runAndClose(() => onSwitchTab('usage'))}
+                  className="flex cursor-pointer items-center gap-2.5 rounded-[6px] px-2.5 py-2 text-[13px] text-[var(--foreground)] aria-selected:bg-[var(--muted)]"
+                >
+                  <BarChart3 className="h-3.5 w-3.5 text-[var(--muted-foreground)]" />
+                  <span>Go to Usage History</span>
                 </Command.Item>
                 <Command.Item
                   value="Settings defaults preferences"

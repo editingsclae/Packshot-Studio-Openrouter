@@ -72,6 +72,7 @@ import {
 import { ImageResultCard } from '@/components/image-result-card';
 import { LightboxModal } from '@/components/lightbox-modal';
 import { LibraryView } from '@/components/library-view';
+import { UsageView } from '@/components/usage-view';
 import { SettingsView } from '@/components/settings-view';
 import { StudioModal } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
@@ -95,9 +96,23 @@ interface PendingGenerationOverride {
   enhance?: boolean;
 }
 
-export function StudioApp() {
-  const [activeTab, setActiveTab] = useState<StudioTab>('generate');
+interface StudioAppProps {
+  initialTab?: StudioTab;
+}
+
+export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
+  const [activeTab, setActiveTab] = useState<StudioTab>(initialTab);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+
+  const handleTabChange = useCallback((tab: StudioTab) => {
+    setActiveTab(tab);
+    if (typeof window !== 'undefined') {
+      const targetPath = tab === 'usage' ? '/usage' : '/';
+      if (window.location.pathname !== targetPath) {
+        window.history.replaceState(null, '', targetPath);
+      }
+    }
+  }, []);
 
   // Persistent settings & history (IndexedDB via idb-keyval)
   const [settings, setSettings] = useState<StudioSettings>(DEFAULT_SETTINGS);
@@ -945,10 +960,10 @@ export function StudioApp() {
       setActiveRefineChips(record.refineChips ?? []);
       setManualPromptText(record.prompt);
       setPromptEditedManually(true);
-      setActiveTab('generate');
+      handleTabChange('generate');
       toast.success(`Loaded "${record.brief.name}" into Studio`);
     },
-    [models, updateSettings]
+    [models, updateSettings, handleTabChange]
   );
 
   const handleClearLibrary = useCallback(() => {
@@ -1275,7 +1290,7 @@ export function StudioApp() {
     <div className="min-h-screen flex flex-col bg-[var(--background)] text-[var(--foreground)]">
       <TopBar
         activeTab={activeTab}
-        onTabChange={setActiveTab}
+        onTabChange={handleTabChange}
         theme={settings.theme}
         onToggleTheme={() =>
           updateSettings({ theme: settings.theme === 'dark' ? 'light' : 'dark' })
@@ -1715,7 +1730,7 @@ export function StudioApp() {
                     <p>{spendLimitNotice}</p>
                     <button
                       type="button"
-                      onClick={() => setActiveTab('settings')}
+                      onClick={() => handleTabChange('settings')}
                       className="font-medium text-[var(--foreground)] underline cursor-pointer"
                     >
                       Adjust limit in Settings
@@ -1986,7 +2001,18 @@ export function StudioApp() {
             onOpenLightbox={(rec, idx) =>
               setLightboxState({ open: true, record: rec, index: idx })
             }
-            onGoToGenerate={() => setActiveTab('generate')}
+            onGoToGenerate={() => handleTabChange('generate')}
+          />
+        ) : activeTab === 'usage' ? (
+          <UsageView
+            records={history}
+            models={models}
+            costStats={costStats}
+            sessionSpendUsd={sessionSpendUsd}
+            sessionSpendLimitUsd={settings.sessionSpendLimitUsd}
+            onGoToGenerate={() => handleTabChange('generate')}
+            onGoToLibrary={() => handleTabChange('library')}
+            onGoToSettings={() => handleTabChange('settings')}
           />
         ) : (
           <SettingsView
@@ -2106,7 +2132,7 @@ export function StudioApp() {
       <CommandPalette
         open={commandPaletteOpen}
         onOpenChange={setCommandPaletteOpen}
-        onSwitchTab={setActiveTab}
+        onSwitchTab={handleTabChange}
         onSelectPreset={handleSelectShotPreset}
         onLoadSample={handleLoadSample}
         onToggleTheme={() =>

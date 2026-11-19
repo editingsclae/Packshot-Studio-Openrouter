@@ -17,6 +17,8 @@ import { findModelById, type NormalizedImageModel } from '@/lib/models';
 interface UsageHistoryChartProps {
   records: GenerationRecord[];
   models: NormalizedImageModel[];
+  selectedMonth?: string;
+  onSelectedMonthChange?: (month: string) => void;
 }
 
 interface DailySpendDatum {
@@ -51,13 +53,13 @@ function getRecordPaidCost(record: GenerationRecord): number {
     : 0;
 }
 
-function formatMonthKey(date: Date): string {
+export function formatMonthKey(date: Date): string {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, '0');
   return `${y}-${m}`;
 }
 
-function formatMonthLabel(monthKey: string): string {
+export function formatMonthLabel(monthKey: string): string {
   const [yearStr, monthStr] = monthKey.split('-');
   const d = new Date(Number(yearStr), Number(monthStr) - 1, 1);
   return d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
@@ -97,7 +99,12 @@ function SpendTooltip({ active, payload }: ChartTooltipProps) {
   );
 }
 
-export function UsageHistoryChart({ records, models }: UsageHistoryChartProps) {
+export function UsageHistoryChart({
+  records,
+  models,
+  selectedMonth: controlledMonth,
+  onSelectedMonthChange,
+}: UsageHistoryChartProps) {
   const isClient = useSyncExternalStore(
     subscribeNoop,
     () => true,
@@ -105,7 +112,17 @@ export function UsageHistoryChart({ records, models }: UsageHistoryChartProps) {
   );
 
   const currentMonthKey = formatMonthKey(new Date());
-  const [selectedMonth, setSelectedMonth] = useState<string>(currentMonthKey);
+  const [internalMonth, setInternalMonth] = useState<string>(currentMonthKey);
+  const selectedMonth = controlledMonth ?? internalMonth;
+
+  const updateMonth = (delta: number) => {
+    const next = shiftMonth(selectedMonth, delta);
+    if (onSelectedMonthChange) {
+      onSelectedMonthChange(next);
+    } else {
+      setInternalMonth(next);
+    }
+  };
 
   const {
     dailyData,
@@ -242,7 +259,7 @@ export function UsageHistoryChart({ records, models }: UsageHistoryChartProps) {
           <button
             type="button"
             aria-label="Previous month"
-            onClick={() => setSelectedMonth((m) => shiftMonth(m, -1))}
+            onClick={() => updateMonth(-1)}
             className="inline-flex h-7 w-7 items-center justify-center rounded-[5px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--card)] cursor-pointer transition-colors"
           >
             <ChevronLeft className="h-3.5 w-3.5" />
@@ -254,7 +271,7 @@ export function UsageHistoryChart({ records, models }: UsageHistoryChartProps) {
             type="button"
             aria-label="Next month"
             disabled={isCurrentMonth}
-            onClick={() => setSelectedMonth((m) => shiftMonth(m, 1))}
+            onClick={() => updateMonth(1)}
             className="inline-flex h-7 w-7 items-center justify-center rounded-[5px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:bg-[var(--card)] disabled:opacity-35 disabled:pointer-events-none cursor-pointer transition-colors"
           >
             <ChevronRight className="h-3.5 w-3.5" />

@@ -35,7 +35,6 @@ import {
 } from '@/lib/presets';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
-import { UsageHistoryChart } from '@/components/usage-history-chart';
 import {
   Select,
   SelectContent,
@@ -337,9 +336,6 @@ export function LibraryView({
           ) : null}
         </div>
       </div>
-
-      {/* Usage History Dashboard Section */}
-      <UsageHistoryChart records={records} models={models} />
 
       {/* Bulk Selection Action Bar */}
       {isSelecting && filteredItems.length > 0 ? (

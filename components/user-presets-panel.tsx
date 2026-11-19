@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bookmark,
   Check,
@@ -89,6 +89,7 @@ export function UserPresetsPanel({
   onUpdatePreset,
   onDeletePreset,
 }: UserPresetsPanelProps) {
+  const [dropdownOpen, setDropdownOpen] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editingPresetId, setEditingPresetId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState('');
@@ -100,6 +101,17 @@ export function UserPresetsPanel({
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(
     () => new Set()
+  );
+
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  const activePreset = useMemo(
+    () =>
+      activePresetId
+        ? presets.find((p) => p.id === activePresetId) ?? null
+        : null,
+    [presets, activePresetId]
   );
 
   const categoryCounts = useMemo(() => {
@@ -129,20 +141,45 @@ export function UserPresetsPanel({
       ? selectedCategory
       : 'all';
 
+  useEffect(() => {
+    if (!dropdownOpen) return;
+    const handleOutside = (e: MouseEvent) => {
+      if (
+        containerRef.current &&
+        !containerRef.current.contains(e.target as Node)
+      ) {
+        setDropdownOpen(false);
+      }
+    };
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !modalOpen) {
+        setDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutside);
+    window.addEventListener('keydown', handleEsc);
+    const t = setTimeout(() => searchInputRef.current?.focus(), 20);
+    return () => {
+      clearTimeout(t);
+      document.removeEventListener('mousedown', handleOutside);
+      window.removeEventListener('keydown', handleEsc);
+    };
+  }, [dropdownOpen, modalOpen]);
+
   const openSaveModal = () => {
     const suggestedCat = currentSnapshot.suggestedCategory || 'Catalog';
+    setDropdownOpen(false);
     setEditingPresetId(null);
     setDraftName(currentSnapshot.suggestedName);
     setDraftCategory(suggestedCat);
-    setCustomCategoryMode(
-      !modalQuickCategories.includes(suggestedCat)
-    );
+    setCustomCategoryMode(!modalQuickCategories.includes(suggestedCat));
     setDraftPrompt(currentSnapshot.promptText);
     setModalOpen(true);
   };
 
   const openEditModal = (preset: UserPreset) => {
     const cat = preset.category || 'Catalog';
+    setDropdownOpen(false);
     setEditingPresetId(preset.id);
     setDraftName(preset.name);
     setDraftCategory(cat);
@@ -219,7 +256,11 @@ export function UserPresetsPanel({
     : undefined;
 
   return (
-    <section className="space-y-2.5" aria-labelledby="user-presets-heading">
+    <section
+      ref={containerRef}
+      className="space-y-2.5"
+      aria-labelledby="user-presets-heading"
+    >
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <Bookmark className="h-3.5 w-3.5 text-[var(--muted-foreground)]" />
@@ -246,236 +287,312 @@ export function UserPresetsPanel({
         </button>
       </div>
 
-      {presets.length === 0 ? (
-        <div className="flex items-center justify-between gap-3 rounded-[8px] border border-dashed border-[var(--border)] bg-[var(--surface)]/60 px-3 py-2.5">
-          <p className="text-[11px] leading-snug text-[var(--muted-foreground)]">
-            Save prompt, aspect ratio, resolution &amp; model settings into organized categories.
-          </p>
-          <button
-            type="button"
-            onClick={openSaveModal}
-            className="shrink-0 text-[11px] font-medium text-[var(--foreground)] hover:underline cursor-pointer"
-          >
-            Save template
-          </button>
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {/* Category Filter Chips */}
-          <div
-            role="tablist"
-            aria-label="Filter presets by category"
-            className="flex flex-wrap items-center gap-1"
-          >
-            <button
-              type="button"
-              role="tab"
-              aria-selected={activeCategoryFilter === 'all'}
-              onClick={() => setSelectedCategory('all')}
-              className={cn(
-                'inline-flex h-6 items-center gap-1 rounded-[5px] border px-2 text-[11px] font-medium transition-colors cursor-pointer',
-                activeCategoryFilter === 'all'
-                  ? 'border-[var(--foreground)] bg-[var(--foreground)] text-[var(--background)]'
-                  : 'border-[var(--border)] bg-[var(--surface)] text-[var(--muted-foreground)] hover:border-[var(--border-hover)] hover:text-[var(--foreground)]'
-              )}
-            >
-              <span>All</span>
-              <span className="font-mono text-[10px] opacity-75 tabular-nums">
-                {presets.length}
+      {/* Presets Dropdown Selector */}
+      <div className="relative">
+        <button
+          type="button"
+          aria-expanded={dropdownOpen}
+          aria-haspopup="listbox"
+          onClick={() => {
+            if (presets.length === 0) {
+              openSaveModal();
+              return;
+            }
+            setDropdownOpen((prev) => !prev);
+          }}
+          className={cn(
+            'flex h-10 w-full items-center justify-between gap-2 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-3 text-left text-[13px] text-[var(--foreground)] transition-colors duration-150 hover:border-[var(--border-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3] cursor-pointer',
+            dropdownOpen && 'border-[var(--border-hover)]'
+          )}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            {presets.length === 0 ? (
+              <span className="truncate text-[12px] text-[var(--muted-foreground)]">
+                No presets saved yet — click to save current setup
               </span>
-            </button>
-
-            {availableFilterCategories.map((cat) => {
-              const active = activeCategoryFilter === cat;
-              const count = categoryCounts.get(cat) ?? 0;
-              return (
-                <button
-                  key={cat}
-                  type="button"
-                  role="tab"
-                  aria-selected={active}
-                  onClick={() => setSelectedCategory(cat)}
-                  className={cn(
-                    'inline-flex h-6 items-center gap-1 rounded-[5px] border px-2 text-[11px] font-medium transition-colors cursor-pointer',
-                    active
-                      ? 'border-[var(--foreground)] bg-[var(--foreground)] text-[var(--background)]'
-                      : 'border-[var(--border)] bg-[var(--surface)] text-[var(--muted-foreground)] hover:border-[var(--border-hover)] hover:text-[var(--foreground)]'
-                  )}
-                >
-                  <span>{cat}</span>
-                  <span className="font-mono text-[10px] opacity-75 tabular-nums">
-                    {count}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-
-          {presets.length > 4 ? (
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-[var(--muted-foreground)]" />
-              <Input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Filter presets by name, category, model..."
-                className="h-7 pl-7 text-[11px]"
-              />
-            </div>
-          ) : null}
-
-          <div className="studio-scrollbar max-h-56 overflow-y-auto space-y-2 pr-0.5">
-            {groupedPresets.length === 0 ? (
-              <p className="py-3 text-center text-[11px] text-[var(--muted-foreground)]">
-                No matching presets.
-              </p>
+            ) : activePreset ? (
+              <>
+                <span className="truncate font-medium text-[var(--foreground)]">
+                  {activePreset.name}
+                </span>
+                <span className="shrink-0 rounded-[4px] border border-[var(--border)] bg-[var(--card)] px-1.5 py-0.2 font-mono text-[9px] uppercase tracking-wider text-[var(--muted-foreground)]">
+                  {activePreset.category || 'Catalog'}
+                </span>
+                <span className="hidden sm:inline font-mono text-[11px] text-[var(--muted-foreground)] shrink-0 tabular-nums">
+                  {activePreset.aspectRatio}
+                </span>
+              </>
             ) : (
-              groupedPresets.map((group) => {
-                const showGroupHeader =
-                  activeCategoryFilter === 'all' &&
-                  availableFilterCategories.length > 1;
-                const isCollapsed =
-                  showGroupHeader &&
-                  !search.trim() &&
-                  collapsedCategories.has(group.category);
-
-                return (
-                  <div key={group.category} className="space-y-1">
-                    {showGroupHeader ? (
-                      <button
-                        type="button"
-                        onClick={() => toggleCategoryCollapse(group.category)}
-                        className="flex w-full items-center justify-between rounded-[5px] px-1.5 py-1 text-left font-mono text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)] hover:bg-[var(--surface)] hover:text-[var(--foreground)] cursor-pointer transition-colors"
-                      >
-                        <span className="flex items-center gap-1">
-                          {isCollapsed ? (
-                            <ChevronRight className="h-3 w-3" />
-                          ) : (
-                            <ChevronDown className="h-3 w-3" />
-                          )}
-                          <span>{group.category}</span>
-                        </span>
-                        <span className="tabular-nums">{group.items.length}</span>
-                      </button>
-                    ) : null}
-
-                    {!isCollapsed ? (
-                      <div className="space-y-1.5">
-                        {group.items.map((preset) => {
-                          const isActive = activePresetId === preset.id;
-                          const modelName =
-                            findModelById(models, preset.modelId)?.name ??
-                            preset.modelId;
-
-                          return (
-                            <div
-                              key={preset.id}
-                              className={cn(
-                                'group flex items-start justify-between gap-2 rounded-[8px] border p-2.5 transition-colors duration-150',
-                                isActive
-                                  ? 'border-[var(--foreground)] bg-[var(--surface)]'
-                                  : 'border-[var(--border)] bg-[var(--card)] hover:border-[var(--border-hover)]'
-                              )}
-                            >
-                              <button
-                                type="button"
-                                onClick={() => onApplyPreset(preset)}
-                                className="min-w-0 flex-1 text-left cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3] rounded-[4px]"
-                              >
-                                <div className="flex items-center gap-1.5">
-                                  {isActive ? (
-                                    <Check className="h-3 w-3 shrink-0 text-[var(--foreground)]" />
-                                  ) : null}
-                                  <span className="truncate text-[12px] font-semibold text-[var(--foreground)]">
-                                    {preset.name}
-                                  </span>
-                                  {!showGroupHeader ? (
-                                    <span className="shrink-0 rounded-[4px] border border-[var(--border)] bg-[var(--surface)] px-1.5 py-0.2 font-mono text-[9px] uppercase tracking-wider text-[var(--muted-foreground)]">
-                                      {preset.category || 'Catalog'}
-                                    </span>
-                                  ) : null}
-                                </div>
-
-                                <div className="mt-1 flex flex-wrap items-center gap-1 font-mono text-[10px] tabular-nums text-[var(--muted-foreground)]">
-                                  <span className="max-w-[130px] truncate text-[var(--foreground)]">
-                                    {modelName}
-                                  </span>
-                                  <span>·</span>
-                                  <span>{preset.aspectRatio}</span>
-                                  <span>·</span>
-                                  <span>
-                                    {preset.resolution === 'auto'
-                                      ? 'Auto res'
-                                      : preset.resolution}
-                                  </span>
-                                  {preset.quality !== 'auto' ? (
-                                    <>
-                                      <span>·</span>
-                                      <span>{preset.quality}</span>
-                                    </>
-                                  ) : null}
-                                  {preset.variations > 1 ? (
-                                    <>
-                                      <span>·</span>
-                                      <span>{preset.variations}x</span>
-                                    </>
-                                  ) : null}
-                                </div>
-
-                                <p className="mt-1 truncate text-[11px] text-[var(--muted-foreground)]">
-                                  {preset.promptText}
-                                </p>
-                              </button>
-
-                              <div className="flex items-center gap-1 shrink-0 pt-0.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 transition-opacity">
-                                <button
-                                  type="button"
-                                  title="Edit preset name, category & prompt"
-                                  aria-label={`Edit ${preset.name}`}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    openEditModal(preset);
-                                  }}
-                                  className="inline-flex h-6 w-6 items-center justify-center rounded-[5px] border border-[var(--border)] bg-[var(--surface)] text-[var(--muted-foreground)] hover:border-[var(--border-hover)] hover:text-[var(--foreground)] cursor-pointer"
-                                >
-                                  <Pencil className="h-3 w-3" />
-                                </button>
-                                <button
-                                  type="button"
-                                  title="Update preset with current settings"
-                                  aria-label={`Update ${preset.name} with current settings`}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    onUpdatePreset(preset.id);
-                                  }}
-                                  className="inline-flex h-6 w-6 items-center justify-center rounded-[5px] border border-[var(--border)] bg-[var(--surface)] text-[var(--muted-foreground)] hover:border-[var(--border-hover)] hover:text-[var(--foreground)] cursor-pointer"
-                                >
-                                  <RotateCw className="h-3 w-3" />
-                                </button>
-                                <button
-                                  type="button"
-                                  title="Delete preset"
-                                  aria-label={`Delete ${preset.name}`}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    onDeletePreset(preset.id);
-                                  }}
-                                  className="inline-flex h-6 w-6 items-center justify-center rounded-[5px] border border-[var(--border)] bg-[var(--surface)] text-[var(--muted-foreground)] hover:border-red-500/40 hover:text-red-500 cursor-pointer"
-                                >
-                                  <Trash2 className="h-3 w-3" />
-                                </button>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    ) : null}
-                  </div>
-                );
-              })
+              <>
+                <span className="truncate text-[var(--muted-foreground)]">
+                  Select a preset...
+                </span>
+                <span className="font-mono text-[11px] text-[var(--muted-foreground)] shrink-0 tabular-nums">
+                  {presets.length} saved
+                </span>
+              </>
             )}
           </div>
-        </div>
-      )}
+
+          <ChevronDown
+            className={cn(
+              'h-3.5 w-3.5 shrink-0 text-[var(--muted-foreground)] transition-transform duration-150',
+              dropdownOpen && 'rotate-180'
+            )}
+          />
+        </button>
+
+        {dropdownOpen && presets.length > 0 ? (
+          <div className="absolute left-0 right-0 z-50 mt-1.5 overflow-hidden rounded-[8px] border border-[var(--border)] bg-[var(--card)]">
+            {/* Search & Category Filter Header */}
+            <div className="border-b border-[var(--border)] p-2 space-y-2">
+              {presets.length > 2 ? (
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--muted-foreground)]" />
+                  <Input
+                    ref={searchInputRef}
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder="Filter presets by name, category, model..."
+                    className="h-8 pl-8 text-[12px]"
+                  />
+                </div>
+              ) : null}
+
+              {availableFilterCategories.length > 1 ? (
+                <div
+                  role="tablist"
+                  aria-label="Filter presets by category"
+                  className="flex flex-wrap items-center gap-1"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={activeCategoryFilter === 'all'}
+                    onClick={() => setSelectedCategory('all')}
+                    className={cn(
+                      'inline-flex h-6 items-center gap-1 rounded-[5px] border px-2 text-[11px] font-medium transition-colors cursor-pointer',
+                      activeCategoryFilter === 'all'
+                        ? 'border-[var(--foreground)] bg-[var(--foreground)] text-[var(--background)]'
+                        : 'border-[var(--border)] bg-[var(--surface)] text-[var(--muted-foreground)] hover:border-[var(--border-hover)] hover:text-[var(--foreground)]'
+                    )}
+                  >
+                    <span>All</span>
+                    <span className="font-mono text-[10px] opacity-75 tabular-nums">
+                      {presets.length}
+                    </span>
+                  </button>
+
+                  {availableFilterCategories.map((cat) => {
+                    const active = activeCategoryFilter === cat;
+                    const count = categoryCounts.get(cat) ?? 0;
+                    return (
+                      <button
+                        key={cat}
+                        type="button"
+                        role="tab"
+                        aria-selected={active}
+                        onClick={() => setSelectedCategory(cat)}
+                        className={cn(
+                          'inline-flex h-6 items-center gap-1 rounded-[5px] border px-2 text-[11px] font-medium transition-colors cursor-pointer',
+                          active
+                            ? 'border-[var(--foreground)] bg-[var(--foreground)] text-[var(--background)]'
+                            : 'border-[var(--border)] bg-[var(--surface)] text-[var(--muted-foreground)] hover:border-[var(--border-hover)] hover:text-[var(--foreground)]'
+                        )}
+                      >
+                        <span>{cat}</span>
+                        <span className="font-mono text-[10px] opacity-75 tabular-nums">
+                          {count}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </div>
+
+            {/* Scrollable Preset List */}
+            <div
+              role="listbox"
+              aria-label="Saved presets"
+              className="studio-scrollbar max-h-72 overflow-y-auto p-1.5 space-y-2"
+            >
+              {groupedPresets.length === 0 ? (
+                <p className="py-5 text-center text-[12px] text-[var(--muted-foreground)]">
+                  No matching presets.
+                </p>
+              ) : (
+                groupedPresets.map((group) => {
+                  const showGroupHeader =
+                    activeCategoryFilter === 'all' &&
+                    availableFilterCategories.length > 1;
+                  const isCollapsed =
+                    showGroupHeader &&
+                    !search.trim() &&
+                    collapsedCategories.has(group.category);
+
+                  return (
+                    <div key={group.category} className="space-y-1">
+                      {showGroupHeader ? (
+                        <button
+                          type="button"
+                          onClick={() => toggleCategoryCollapse(group.category)}
+                          className="flex w-full items-center justify-between rounded-[5px] px-2 py-1 text-left font-mono text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)] hover:bg-[var(--surface)] hover:text-[var(--foreground)] cursor-pointer transition-colors"
+                        >
+                          <span className="flex items-center gap-1">
+                            {isCollapsed ? (
+                              <ChevronRight className="h-3 w-3" />
+                            ) : (
+                              <ChevronDown className="h-3 w-3" />
+                            )}
+                            <span>{group.category}</span>
+                          </span>
+                          <span className="tabular-nums">
+                            {group.items.length}
+                          </span>
+                        </button>
+                      ) : null}
+
+                      {!isCollapsed ? (
+                        <div className="space-y-1">
+                          {group.items.map((preset) => {
+                            const isActive = activePresetId === preset.id;
+                            const modelName =
+                              findModelById(models, preset.modelId)?.name ??
+                              preset.modelId;
+
+                            return (
+                              <div
+                                key={preset.id}
+                                role="option"
+                                aria-selected={isActive}
+                                className={cn(
+                                  'group flex items-start justify-between gap-2 rounded-[6px] px-2 py-2 transition-colors',
+                                  isActive
+                                    ? 'bg-[var(--surface)]'
+                                    : 'hover:bg-[var(--surface)]/70'
+                                )}
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    onApplyPreset(preset);
+                                    setDropdownOpen(false);
+                                    setSearch('');
+                                  }}
+                                  className="min-w-0 flex-1 text-left cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3] rounded-[4px]"
+                                >
+                                  <div className="flex items-center gap-1.5">
+                                    {isActive ? (
+                                      <Check className="h-3.5 w-3.5 shrink-0 text-[var(--foreground)]" />
+                                    ) : null}
+                                    <span className="truncate text-[12px] font-semibold text-[var(--foreground)]">
+                                      {preset.name}
+                                    </span>
+                                    {!showGroupHeader ? (
+                                      <span className="shrink-0 rounded-[4px] border border-[var(--border)] bg-[var(--background)] px-1.5 py-0.2 font-mono text-[9px] uppercase tracking-wider text-[var(--muted-foreground)]">
+                                        {preset.category || 'Catalog'}
+                                      </span>
+                                    ) : null}
+                                  </div>
+
+                                  <div className="mt-0.5 flex flex-wrap items-center gap-1 font-mono text-[10px] tabular-nums text-[var(--muted-foreground)]">
+                                    <span className="max-w-[130px] truncate text-[var(--foreground)]">
+                                      {modelName}
+                                    </span>
+                                    <span>·</span>
+                                    <span>{preset.aspectRatio}</span>
+                                    <span>·</span>
+                                    <span>
+                                      {preset.resolution === 'auto'
+                                        ? 'Auto res'
+                                        : preset.resolution}
+                                    </span>
+                                    {preset.quality !== 'auto' ? (
+                                      <>
+                                        <span>·</span>
+                                        <span>{preset.quality}</span>
+                                      </>
+                                    ) : null}
+                                    {preset.variations > 1 ? (
+                                      <>
+                                        <span>·</span>
+                                        <span>{preset.variations}x</span>
+                                      </>
+                                    ) : null}
+                                  </div>
+
+                                  <p className="mt-0.5 truncate text-[11px] text-[var(--muted-foreground)]">
+                                    {preset.promptText}
+                                  </p>
+                                </button>
+
+                                <div className="flex items-center gap-1 shrink-0 pt-0.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 transition-opacity">
+                                  <button
+                                    type="button"
+                                    title="Edit preset name, category & prompt"
+                                    aria-label={`Edit ${preset.name}`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      openEditModal(preset);
+                                    }}
+                                    className="inline-flex h-6 w-6 items-center justify-center rounded-[5px] border border-[var(--border)] bg-[var(--background)] text-[var(--muted-foreground)] hover:border-[var(--border-hover)] hover:text-[var(--foreground)] cursor-pointer"
+                                  >
+                                    <Pencil className="h-3 w-3" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    title="Update preset with current settings"
+                                    aria-label={`Update ${preset.name} with current settings`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onUpdatePreset(preset.id);
+                                    }}
+                                    className="inline-flex h-6 w-6 items-center justify-center rounded-[5px] border border-[var(--border)] bg-[var(--background)] text-[var(--muted-foreground)] hover:border-[var(--border-hover)] hover:text-[var(--foreground)] cursor-pointer"
+                                  >
+                                    <RotateCw className="h-3 w-3" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    title="Delete preset"
+                                    aria-label={`Delete ${preset.name}`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onDeletePreset(preset.id);
+                                    }}
+                                    className="inline-flex h-6 w-6 items-center justify-center rounded-[5px] border border-[var(--border)] bg-[var(--background)] text-[var(--muted-foreground)] hover:border-red-500/40 hover:text-red-500 cursor-pointer"
+                                  >
+                                    <Trash2 className="h-3 w-3" />
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* Footer Action */}
+            <div className="flex items-center justify-between border-t border-[var(--border)] bg-[var(--surface)]/50 px-2.5 py-2">
+              <span className="font-mono text-[10px] tabular-nums text-[var(--muted-foreground)]">
+                {filteredPresets.length} of {presets.length} presets
+              </span>
+              <button
+                type="button"
+                onClick={openSaveModal}
+                className="inline-flex items-center gap-1 text-[11px] font-medium text-[var(--foreground)] hover:underline cursor-pointer"
+              >
+                <Plus className="h-3 w-3" />
+                <span>Save current setup</span>
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </div>
 
       {/* Save / Edit Preset Dialog */}
       <StudioModal
