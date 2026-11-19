@@ -8,11 +8,17 @@ import {
   Copy,
   Download,
   Heart,
+  Info,
   Shuffle,
   XCircle,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { downloadImageAs, type GeneratedImageItem } from '@/lib/db';
+import {
+  downloadImageAs,
+  isSvgMedia,
+  type GeneratedImageItem,
+} from '@/lib/db';
+import type { ModelTier } from '@/lib/models';
 import { StudioModal } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -25,7 +31,9 @@ interface LightboxModalProps {
   onIndexChange: (nextIndex: number) => void;
   productName: string;
   prompt: string;
+  modelId: string;
   modelName: string;
+  modelTier?: ModelTier;
   isWhiteBackgroundShot: boolean;
   onToggleFavorite: (imageId: string) => void;
   onRemix: () => void;
@@ -39,7 +47,9 @@ export function LightboxModal({
   onIndexChange,
   productName,
   prompt,
+  modelId,
   modelName,
+  modelTier,
   isWhiteBackgroundShot,
   onToggleFavorite,
   onRemix,
@@ -61,15 +71,24 @@ export function LightboxModal({
 
   if (!image) return null;
 
+  const isSvg = isSvgMedia(image.mediaType, image.dataUrl);
+  const downloadFormats: ('svg' | 'png' | 'webp' | 'jpeg')[] = isSvg
+    ? ['svg', 'png', 'webp', 'jpeg']
+    : ['png', 'webp', 'jpeg'];
+
   const safeSlug =
     productName
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/(^-|-$)/g, '') || 'packshot';
 
-  const handleDownload = async (format: 'png' | 'webp' | 'jpeg') => {
+  const handleDownload = async (format: 'png' | 'webp' | 'jpeg' | 'svg') => {
     try {
-      await downloadImageAs(image.dataUrl, `${safeSlug}-${image.seed ?? image.id.slice(0, 6)}`, format);
+      await downloadImageAs(
+        image.dataUrl,
+        `${safeSlug}-${image.seed ?? image.id.slice(0, 6)}`,
+        format
+      );
       toast.success(`Downloaded ${format.toUpperCase()}`);
     } catch {
       toast.error('Export failed');
@@ -80,14 +99,20 @@ export function LightboxModal({
     try {
       const res = await fetch(image.dataUrl);
       const blob = await res.blob();
-      if (navigator.clipboard && typeof ClipboardItem !== 'undefined') {
+      if (navigator.clipboard && typeof ClipboardItem !== 'undefined' && !isSvg) {
         await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
         toast.success('Copied image to clipboard');
+      } else {
+        const text = isSvg ? await blob.text() : image.dataUrl;
+        await navigator.clipboard.writeText(text);
+        toast.success(isSvg ? 'SVG markup copied' : 'Copied data URL');
       }
     } catch {
       toast.error('Clipboard copy blocked');
     }
   };
+
+  const resolvedTier = modelTier ?? (modelId.endsWith(':free') ? 'free' : 'paid');
 
   return (
     <StudioModal
@@ -136,8 +161,8 @@ export function LightboxModal({
               <h3 className="text-[15px] font-semibold tracking-[-0.02em] text-[var(--foreground)]">
                 {productName || 'Untitled Product'}
               </h3>
-              <p className="mt-1 font-mono text-[12px] text-[var(--muted-foreground)]">
-                {modelName}
+              <p className="mt-1 font-mono text-[11px] text-[var(--muted-foreground)] break-all">
+                {modelName} · {modelId} · <span className="capitalize">{resolvedTier}</span>
               </p>
             </div>
 
@@ -145,7 +170,7 @@ export function LightboxModal({
               <div>
                 <span className="block text-[var(--muted-foreground)]">Cost</span>
                 <span className="text-[var(--foreground)]">
-                  {image.cost !== null ? `$${image.cost.toFixed(3)}` : 'Free'}
+                  {image.cost !== null ? `$${image.cost.toFixed(4)}` : 'n/a'}
                 </span>
               </div>
               <div>
@@ -160,7 +185,12 @@ export function LightboxModal({
               </div>
             </div>
 
-            {isWhiteBackgroundShot && image.packshotCheck ? (
+            {isWhiteBackgroundShot && isSvg ? (
+              <div className="flex items-center gap-2 rounded-[8px] border border-[var(--border)] bg-[var(--surface)] p-3 text-[12px] text-[var(--muted-foreground)]">
+                <Info className="h-4 w-4 shrink-0" />
+                <span>SVG output — canvas packshot check skipped</span>
+              </div>
+            ) : isWhiteBackgroundShot && image.packshotCheck ? (
               <div className="space-y-1.5 rounded-[8px] border border-[var(--border)] bg-[var(--surface)] p-3 text-[12px]">
                 <div className="font-medium text-[var(--foreground)]">Packshot Quality Check</div>
                 <div className="flex items-center justify-between text-[var(--muted-foreground)]">
@@ -203,8 +233,13 @@ export function LightboxModal({
           </div>
 
           <div className="space-y-2.5 border-t border-[var(--border)] pt-4">
-            <div className="grid grid-cols-3 gap-1.5">
-              {(['png', 'webp', 'jpeg'] as const).map((fmt) => (
+            <div
+              className={cn(
+                'grid gap-1.5',
+                downloadFormats.length === 4 ? 'grid-cols-4' : 'grid-cols-3'
+              )}
+            >
+              {downloadFormats.map((fmt) => (
                 <Button
                   key={fmt}
                   variant="secondary"

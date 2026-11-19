@@ -18,10 +18,14 @@ import { toast } from 'sonner';
 import {
   downloadImageAs,
   downloadSelectedAsZip,
+  isSvgMedia,
   type GeneratedImageItem,
   type GenerationRecord,
 } from '@/lib/db';
-import { getModelSpec } from '@/lib/models';
+import {
+  findModelById,
+  type NormalizedImageModel,
+} from '@/lib/models';
 import {
   getCategorySpec,
   getShotPreset,
@@ -30,6 +34,7 @@ import {
 } from '@/lib/presets';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
+import { UsageHistoryChart } from '@/components/usage-history-chart';
 import {
   Select,
   SelectContent,
@@ -41,6 +46,7 @@ import { cn } from '@/lib/utils';
 
 interface LibraryViewProps {
   records: GenerationRecord[];
+  models: NormalizedImageModel[];
   onRemixRecord: (record: GenerationRecord) => void;
   onToggleFavorite: (recordId: string, imageId: string) => void;
   onDeleteImage: (recordId: string, imageId: string) => void;
@@ -64,6 +70,7 @@ function slugifyProduct(name: string) {
 
 export function LibraryView({
   records,
+  models,
   onRemixRecord,
   onToggleFavorite,
   onDeleteImage,
@@ -76,7 +83,6 @@ export function LibraryView({
   const [shotFilter, setShotFilter] = useState<string>('all');
   const [favoritesOnly, setFavoritesOnly] = useState(false);
 
-  // Bulk-selection state
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(() => new Set());
   const [isZipping, setIsZipping] = useState(false);
@@ -102,6 +108,7 @@ export function LibraryView({
           record.brief.name,
           record.brief.materialFinish,
           record.brief.keyFeatures,
+          record.modelId,
           record.prompt,
         ]
           .join(' ')
@@ -123,7 +130,6 @@ export function LibraryView({
     return list;
   }, [records, search, categoryFilter, shotFilter, favoritesOnly]);
 
-  // All valid items across records matching selectedKeys
   const selectedEntries = useMemo(() => {
     const entries: Array<{
       key: string;
@@ -193,7 +199,7 @@ export function LibraryView({
   const handleDownload = async (
     record: GenerationRecord,
     image: GeneratedImageItem,
-    fmt: 'png' | 'webp' | 'jpeg'
+    fmt: 'png' | 'webp' | 'jpeg' | 'svg'
   ) => {
     try {
       await downloadImageAs(
@@ -207,13 +213,17 @@ export function LibraryView({
     }
   };
 
-  const handleCopy = async (dataUrl: string) => {
+  const handleCopy = async (dataUrl: string, isSvg: boolean) => {
     try {
       const res = await fetch(dataUrl);
       const blob = await res.blob();
-      if (navigator.clipboard && typeof ClipboardItem !== 'undefined') {
+      if (navigator.clipboard && typeof ClipboardItem !== 'undefined' && !isSvg) {
         await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
         toast.success('Image copied to clipboard');
+      } else {
+        const text = isSvg ? await blob.text() : dataUrl;
+        await navigator.clipboard.writeText(text);
+        toast.success(isSvg ? 'SVG markup copied' : 'Image copied');
       }
     } catch {
       toast.error('Clipboard copy blocked');
@@ -243,7 +253,7 @@ export function LibraryView({
             <Input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search products or prompts..."
+              placeholder="Search products, models..."
               className="pl-8"
             />
           </div>
@@ -313,6 +323,9 @@ export function LibraryView({
           ) : null}
         </div>
       </div>
+
+      {/* Usage History Dashboard Section */}
+      <UsageHistoryChart records={records} models={models} />
 
       {/* Bulk Selection Action Bar */}
       {isSelecting && filteredItems.length > 0 ? (
@@ -418,8 +431,21 @@ export function LibraryView({
           {filteredItems.map(({ key, record, image, imageIndex }) => {
             const shot = getShotPreset(record.shotId);
             const category = getCategorySpec(record.brief.category);
-            const model = getModelSpec(record.modelId);
+            const model = findModelById(models, record.modelId);
+            const resolvedTier =
+              record.modelTier ??
+              model?.tier ??
+              (record.modelId.endsWith(':free') ? 'free' : 'paid');
             const isSelected = selectedKeys.has(key);
+            const isSvg = isSvgMedia(image.mediaType, image.dataUrl);
+            const actualCostLabel =
+              image.cost !== null
+                ? `$${image.cost.toFixed(4)}`
+                : record.actualCost !== null && record.actualCost !== undefined
+                  ? `$${record.actualCost.toFixed(4)}`
+                  : resolvedTier === 'free'
+                    ? '$0.0000'
+                    : 'cost n/a';
 
             return (
               <article
@@ -512,34 +538,40 @@ export function LibraryView({
                   </div>
                 </div>
 
-                <div className="flex flex-1 flex-col gap-2.5 p-3.5">
+                <div className="flex flex-1 flex-col gap-2 p-3.5">
                   <div>
                     <h2 className="truncate text-[14px] font-semibold tracking-[-0.01em] text-[var(--foreground)]">
                       {record.brief.name}
                     </h2>
                     <p className="mt-0.5 truncate text-[12px] text-[var(--muted-foreground)]">
-                      {shot.name} · {category.label} · {model.shortName}
+                      {shot.name} · {category.label}
                     </p>
                   </div>
 
-                  <div className="font-mono text-[11px] tabular-nums text-[var(--muted-foreground)]">
-                    {image.cost !== null ? `$${image.cost.toFixed(3)}` : 'Free'} ·{' '}
-                    {(image.durationMs / 1000).toFixed(1)}s · {record.aspectRatio}
+                  {/* Model id, tier, and actual cost */}
+                  <div className="space-y-0.5 font-mono text-[11px] tabular-nums text-[var(--muted-foreground)]">
+                    <div className="truncate text-[var(--foreground)]" title={record.modelId}>
+                      {record.modelId}
+                    </div>
+                    <div>
+                      <span className="capitalize">{resolvedTier}</span> · {actualCostLabel} ·{' '}
+                      {(image.durationMs / 1000).toFixed(1)}s · {record.aspectRatio}
+                    </div>
                   </div>
 
                   <div className="mt-auto flex items-center justify-between gap-1.5 border-t border-[var(--border)] pt-2.5">
                     <div className="flex items-center gap-1">
                       <button
                         type="button"
-                        onClick={() => handleDownload(record, image, 'png')}
-                        className="inline-flex h-7 items-center gap-1 rounded-[6px] border border-[var(--border)] px-2 font-mono text-[11px] text-[var(--muted-foreground)] hover:border-[var(--border-hover)] hover:text-[var(--foreground)] cursor-pointer"
+                        onClick={() => handleDownload(record, image, isSvg ? 'svg' : 'png')}
+                        className="inline-flex h-7 items-center gap-1 rounded-[6px] border border-[var(--border)] px-2 font-mono text-[11px] uppercase text-[var(--muted-foreground)] hover:border-[var(--border-hover)] hover:text-[var(--foreground)] cursor-pointer"
                       >
                         <Download className="h-3 w-3" />
-                        PNG
+                        {isSvg ? 'SVG' : 'PNG'}
                       </button>
                       <button
                         type="button"
-                        onClick={() => handleCopy(image.dataUrl)}
+                        onClick={() => handleCopy(image.dataUrl, isSvg)}
                         aria-label="Copy image"
                         className="inline-flex h-7 w-7 items-center justify-center rounded-[6px] border border-[var(--border)] text-[var(--muted-foreground)] hover:border-[var(--border-hover)] hover:text-[var(--foreground)] cursor-pointer"
                       >

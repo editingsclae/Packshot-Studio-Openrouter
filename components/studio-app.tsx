@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   Aperture,
   Check,
+  Clock,
   RotateCcw,
   Sparkles,
   Wand2,
@@ -12,10 +13,17 @@ import {
 import { toast } from 'sonner';
 import {
   ASPECT_RATIOS,
-  getModelSpec,
-  MODEL_CATALOG,
+  DEFAULT_FREE_MODEL_ID,
+  findModelById,
+  formatBatchEstimate,
+  formatModelPrice,
+  getCheapestPaidModel,
+  OFFLINE_FALLBACK_MODELS,
+  sortModelsByPriceAsc,
   type AspectRatio,
-  type ModelSpec,
+  type DiscoverySource,
+  type ModelTier,
+  type NormalizedImageModel,
 } from '@/lib/models';
 import {
   getShotPreset,
@@ -32,6 +40,7 @@ import {
 import { analyzePackshotImage } from '@/lib/packshot-check';
 import {
   DEFAULT_SETTINGS,
+  isSvgMedia,
   loadHistory,
   loadSettings,
   saveHistory,
@@ -43,11 +52,17 @@ import {
 import { TopBar, type StudioTab } from '@/components/top-bar';
 import { CommandPalette } from '@/components/command-palette';
 import { BriefForm } from '@/components/brief-form';
+import {
+  ModelSelector,
+  type DiscoveryStatus,
+} from '@/components/model-selector';
 import { ImageResultCard } from '@/components/image-result-card';
 import { LightboxModal } from '@/components/lightbox-modal';
 import { LibraryView } from '@/components/library-view';
 import { SettingsView } from '@/components/settings-view';
+import { StudioModal } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
@@ -60,6 +75,13 @@ import {
 } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 
+interface PendingGenerationOverride {
+  prompt?: string;
+  promptEditedManually?: boolean;
+  refineChipIds?: string[];
+  enhance?: boolean;
+}
+
 export function StudioApp() {
   const [activeTab, setActiveTab] = useState<StudioTab>('generate');
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
@@ -69,8 +91,15 @@ export function StudioApp() {
   const [history, setHistory] = useState<GenerationRecord[]>([]);
   const [hydrated, setHydrated] = useState(false);
 
-  // Live model discovery metadata from /api/models
-  const [models, setModels] = useState<ModelSpec[]>(MODEL_CATALOG);
+  // Dynamic OpenRouter image models
+  const [models, setModels] = useState<NormalizedImageModel[]>(OFFLINE_FALLBACK_MODELS);
+  const [discoveryStatus, setDiscoveryStatus] = useState<DiscoveryStatus>({
+    source: 'cache',
+    updatedAt: 0,
+    failedCount: 0,
+  });
+  const [isLoadingModels, setIsLoadingModels] = useState(true);
+  const [isRefreshingModels, setIsRefreshingModels] = useState(false);
   const [serverStatus, setServerStatus] = useState<{
     hasApiKey: boolean;
     enhancerModel: string;
@@ -79,13 +108,20 @@ export function StudioApp() {
   // Generation control state
   const [brief, setBrief] = useState<ProductBrief>(DEFAULT_BRIEF);
   const [shotId, setShotId] = useState<ShotPresetId>('marketplace-packshot');
-  const [modelId, setModelId] = useState<string>(DEFAULT_SETTINGS.defaultModel);
+  const [modelId, setModelId] = useState<string>(DEFAULT_FREE_MODEL_ID);
+  const [inputMode, setInputMode] = useState<'text' | 'photo'>('text');
+  const [inputReferences, setInputReferences] = useState<string[]>([]);
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>(
     DEFAULT_SETTINGS.defaultAspectRatio
   );
+  const [clampedRatioNote, setClampedRatioNote] = useState<string | null>(null);
+  const [resolution, setResolution] = useState<string>('auto');
+  const [quality, setQuality] = useState<string>('auto');
+  const [backgroundMode, setBackgroundMode] = useState<'auto' | 'opaque' | 'transparent'>('auto');
+  const [outputFormat, setOutputFormat] = useState<'auto' | 'png' | 'webp' | 'jpeg' | 'svg'>('auto');
+  const [customSeed, setCustomSeed] = useState<string>('');
   const [variations, setVariations] = useState<number>(2);
   const [enhanceEnabled, setEnhanceEnabled] = useState<boolean>(false);
-  const [referenceImage, setReferenceImage] = useState<string | null>(null);
   const [activeRefineChips, setActiveRefineChips] = useState<string[]>([]);
 
   // Prompt inspector override state
@@ -93,12 +129,21 @@ export function StudioApp() {
   const [manualPromptText, setManualPromptText] = useState('');
   const [isEnhancingPreview, setIsEnhancingPreview] = useState(false);
 
-  // Active generation & canvas state
+  // Active generation & elapsed timer state
   const [isGenerating, setIsGenerating] = useState(false);
+  const [elapsedMs, setElapsedMs] = useState(0);
   const [pendingSlots, setPendingSlots] = useState(0);
   const [currentRecord, setCurrentRecord] = useState<GenerationRecord | null>(null);
   const [generationErrors, setGenerationErrors] = useState<string[]>([]);
   const [unavailableModelBanner, setUnavailableModelBanner] = useState<string | null>(null);
+
+  // Cost guard confirmation dialog state (> $0.25)
+  const [costConfirmState, setCostConfirmState] = useState<{
+    open: boolean;
+    estimateLabel: string;
+    modelName: string;
+    override?: PendingGenerationOverride;
+  }>({ open: false, estimateLabel: '', modelName: '' });
 
   // Lightbox state
   const [lightboxState, setLightboxState] = useState<{
@@ -106,6 +151,66 @@ export function StudioApp() {
     record: GenerationRecord | null;
     index: number;
   }>({ open: false, record: null, index: 0 });
+
+  const applyDiscoveryResponse = useCallback(
+    (data: {
+      models?: NormalizedImageModel[];
+      source?: DiscoverySource;
+      updatedAt?: number;
+      error?: string;
+      failedCount?: number;
+      hasApiKey?: boolean;
+      enhancerModel?: string;
+    }) => {
+      if (Array.isArray(data.models) && data.models.length > 0) {
+        setModels(data.models);
+      }
+      setDiscoveryStatus({
+        source: data.source ?? 'live',
+        updatedAt: data.updatedAt ?? Date.now(),
+        error: data.error,
+        failedCount: data.failedCount ?? 0,
+      });
+      setServerStatus({
+        hasApiKey: Boolean(data.hasApiKey),
+        enhancerModel: data.enhancerModel || 'openai/gpt-4o-mini',
+      });
+    },
+    []
+  );
+
+  const handleRefreshModels = useCallback(async () => {
+    setIsRefreshingModels(true);
+    try {
+      const res = await fetch('/api/models?refresh=1', { cache: 'no-store' });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const data = (await res.json()) as {
+        models?: NormalizedImageModel[];
+        source?: DiscoverySource;
+        updatedAt?: number;
+        error?: string;
+        failedCount?: number;
+        hasApiKey?: boolean;
+        enhancerModel?: string;
+      };
+      applyDiscoveryResponse(data);
+      toast.success(`Refreshed ${data.models?.length ?? 0} models`);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : 'Network error';
+      setDiscoveryStatus({
+        source: 'offline',
+        updatedAt: Date.now(),
+        error: reason,
+        failedCount: 0,
+      });
+      toast.error(`Model refresh failed: ${reason}`);
+    } finally {
+      setIsLoadingModels(false);
+      setIsRefreshingModels(false);
+    }
+  }, [applyDiscoveryResponse]);
 
   // Hydrate settings & history from IndexedDB + discover models
   useEffect(() => {
@@ -126,34 +231,43 @@ export function StudioApp() {
       setHydrated(true);
     })();
 
-    fetch('/api/models')
-      .then((res) => (res.ok ? res.json() : null))
-      .then(
-        (
-          data: {
-            models?: ModelSpec[];
-            hasApiKey?: boolean;
-            enhancerModel?: string;
-          } | null
-        ) => {
-          if (!active || !data) return;
-          if (Array.isArray(data.models) && data.models.length > 0) {
-            setModels(data.models);
-          }
-          setServerStatus({
-            hasApiKey: Boolean(data.hasApiKey),
-            enhancerModel: data.enhancerModel || 'openai/gpt-4o-mini',
-          });
+    (async () => {
+      try {
+        const res = await fetch('/api/models', { cache: 'no-store' });
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
         }
-      )
-      .catch(() => {
-        // Catalog fallback remains active
-      });
+        const data = (await res.json()) as {
+          models?: NormalizedImageModel[];
+          source?: DiscoverySource;
+          updatedAt?: number;
+          error?: string;
+          failedCount?: number;
+          hasApiKey?: boolean;
+          enhancerModel?: string;
+        };
+        if (!active) return;
+        applyDiscoveryResponse(data);
+      } catch (err) {
+        if (!active) return;
+        const reason = err instanceof Error ? err.message : 'Network error';
+        setDiscoveryStatus({
+          source: 'offline',
+          updatedAt: Date.now(),
+          error: reason,
+          failedCount: 0,
+        });
+      } finally {
+        if (active) {
+          setIsLoadingModels(false);
+        }
+      }
+    })();
 
     return () => {
       active = false;
     };
-  }, []);
+  }, [applyDiscoveryResponse]);
 
   // Sync HTML .dark class with settings.theme
   useEffect(() => {
@@ -165,6 +279,16 @@ export function StudioApp() {
     }
   }, [settings.theme]);
 
+  // Live elapsed timer during active generation
+  useEffect(() => {
+    if (!isGenerating) return;
+    const start = Date.now();
+    const interval = setInterval(() => {
+      setElapsedMs(Date.now() - start);
+    }, 200);
+    return () => clearInterval(interval);
+  }, [isGenerating]);
+
   const updateSettings = useCallback((patch: Partial<StudioSettings>) => {
     setSettings((prev) => {
       const next = { ...prev, ...patch };
@@ -174,8 +298,116 @@ export function StudioApp() {
   }, []);
 
   const selectedModel = useMemo(
-    () => models.find((m) => m.id === modelId) ?? getModelSpec(modelId),
-    [models, modelId]
+    () =>
+      findModelById(models, modelId) ??
+      models.find((m) => m.tier === settings.modelTier) ??
+      models[0] ??
+      OFFLINE_FALLBACK_MODELS[0],
+    [models, modelId, settings.modelTier]
+  );
+
+  // Clamp aspect ratio if model specifies supportedAspectRatios
+  const applyAspectRatioWithClamp = useCallback(
+    (desiredRatio: AspectRatio, targetModel: NormalizedImageModel) => {
+      const supported = targetModel.supportedAspectRatios;
+      if (supported && supported.length > 0 && !supported.includes(desiredRatio)) {
+        const clamped =
+          ASPECT_RATIOS.find((ar) => supported.includes(ar.value))?.value ?? '1:1';
+        setAspectRatio(clamped);
+        setClampedRatioNote(
+          `Ratio ${desiredRatio} is unsupported by ${targetModel.name}; clamped to ${clamped}.`
+        );
+      } else {
+        setAspectRatio(desiredRatio);
+        setClampedRatioNote(null);
+      }
+    },
+    []
+  );
+
+  const handleSelectModel = useCallback(
+    (nextModelId: string, syncDefault = false) => {
+      const target = findModelById(models, nextModelId);
+      setModelId(nextModelId);
+      setUnavailableModelBanner(null);
+      setResolution('auto');
+      setQuality('auto');
+      setBackgroundMode('auto');
+      setOutputFormat('auto');
+      if (target) {
+        applyAspectRatioWithClamp(aspectRatio, target);
+        if (target.supportsReference && target.maxReferences > 0) {
+          setInputReferences((prev) => prev.slice(0, target.maxReferences));
+        }
+      }
+      if (syncDefault) {
+        updateSettings({ defaultModel: nextModelId });
+      }
+    },
+    [models, aspectRatio, applyAspectRatioWithClamp, updateSettings]
+  );
+
+  const handleInputModeChange = useCallback(
+    (mode: 'text' | 'photo') => {
+      setInputMode(mode);
+      if (mode === 'text' && selectedModel.requiresReference) {
+        const fallback = sortModelsByPriceAsc(
+          models.filter((m) => m.tier === settings.modelTier && !m.requiresReference)
+        )[0];
+        if (fallback) {
+          handleSelectModel(fallback.id, false);
+          toast.info(
+            `Switched to ${fallback.name} (${selectedModel.name} requires a reference image)`
+          );
+        }
+      }
+    },
+    [selectedModel, models, settings.modelTier, handleSelectModel]
+  );
+
+  const handleTierChange = useCallback(
+    (nextTier: ModelTier) => {
+      const tierModels = sortModelsByPriceAsc(
+        models.filter(
+          (m) => m.tier === nextTier && (inputMode === 'photo' || !m.requiresReference)
+        )
+      );
+
+      const currentInTier = tierModels.some((m) => m.id === modelId);
+      const defaultInTier = tierModels.some((m) => m.id === settings.defaultModel);
+
+      if (tierModels.length === 0) {
+        updateSettings({ modelTier: nextTier });
+        return;
+      }
+
+      const nextActiveModel = currentInTier ? modelId : tierModels[0].id;
+      const nextDefaultModel = defaultInTier ? settings.defaultModel : tierModels[0].id;
+
+      updateSettings({
+        modelTier: nextTier,
+        defaultModel: nextDefaultModel,
+      });
+
+      if (!currentInTier) {
+        const chosen = tierModels[0];
+        setModelId(chosen.id);
+        setUnavailableModelBanner(null);
+        applyAspectRatioWithClamp(aspectRatio, chosen);
+        toast.info(`Switched to ${chosen.name} (${nextTier} tier)`);
+      } else if (nextActiveModel !== modelId) {
+        setModelId(nextActiveModel);
+      }
+    },
+    [
+      models,
+      inputMode,
+      modelId,
+      settings.defaultModel,
+      aspectRatio,
+      applyAspectRatioWithClamp,
+      updateSettings,
+    ]
   );
 
   const selectedShot = useMemo(() => getShotPreset(shotId), [shotId]);
@@ -190,23 +422,29 @@ export function StudioApp() {
 
   const activePrompt = promptEditedManually ? manualPromptText : deterministicPrompt;
 
-  const handleSelectShotPreset = useCallback((nextShotId: ShotPresetId) => {
-    const preset = getShotPreset(nextShotId);
-    setShotId(nextShotId);
-    setAspectRatio(preset.defaultAspectRatio);
-    setActiveRefineChips([]);
-    setPromptEditedManually(false);
-  }, []);
+  const handleSelectShotPreset = useCallback(
+    (nextShotId: ShotPresetId) => {
+      const preset = getShotPreset(nextShotId);
+      setShotId(nextShotId);
+      applyAspectRatioWithClamp(preset.defaultAspectRatio, selectedModel);
+      setActiveRefineChips([]);
+      setPromptEditedManually(false);
+    },
+    [applyAspectRatioWithClamp, selectedModel]
+  );
 
-  const handleLoadSample = useCallback((sample: SampleBriefPreset) => {
-    const preset = getShotPreset(sample.shotId);
-    setBrief(sample.brief);
-    setShotId(sample.shotId);
-    setAspectRatio(preset.defaultAspectRatio);
-    setActiveRefineChips([]);
-    setPromptEditedManually(false);
-    toast.success(`Loaded "${sample.label}" brief`);
-  }, []);
+  const handleLoadSample = useCallback(
+    (sample: SampleBriefPreset) => {
+      const preset = getShotPreset(sample.shotId);
+      setBrief(sample.brief);
+      setShotId(sample.shotId);
+      applyAspectRatioWithClamp(preset.defaultAspectRatio, selectedModel);
+      setActiveRefineChips([]);
+      setPromptEditedManually(false);
+      toast.success(`Loaded "${sample.label}" brief`);
+    },
+    [applyAspectRatioWithClamp, selectedModel]
+  );
 
   const handlePreviewEnhance = useCallback(async () => {
     if (isEnhancingPreview) return;
@@ -234,18 +472,12 @@ export function StudioApp() {
     }
   }, [activePrompt, isEnhancingPreview]);
 
-  const runGeneration = useCallback(
-    async (override?: {
-      prompt?: string;
-      promptEditedManually?: boolean;
-      refineChipIds?: string[];
-      enhance?: boolean;
-    }) => {
+  const executeGeneration = useCallback(
+    async (
+      targetModel: NormalizedImageModel,
+      override?: PendingGenerationOverride
+    ) => {
       if (isGenerating) return;
-      if (!brief.name.trim()) {
-        toast.error('Please enter a product name or type first.');
-        return;
-      }
 
       const targetPrompt = override?.prompt ?? activePrompt;
       const targetEditedManually =
@@ -253,7 +485,13 @@ export function StudioApp() {
       const targetRefineChips = override?.refineChipIds ?? activeRefineChips;
       const targetEnhance = override?.enhance ?? enhanceEnabled;
 
+      const parsedSeed =
+        customSeed.trim() && /^\d+$/.test(customSeed.trim())
+          ? Math.min(2_147_483_647, Math.max(1, parseInt(customSeed.trim(), 10)))
+          : undefined;
+
       setIsGenerating(true);
+      setElapsedMs(0);
       setPendingSlots(variations);
       setGenerationErrors([]);
       setUnavailableModelBanner(null);
@@ -264,8 +502,12 @@ export function StudioApp() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             prompt: targetPrompt,
-            model: modelId,
+            model: targetModel.id,
             aspectRatio,
+            resolution: resolution !== 'auto' ? resolution : undefined,
+            quality: quality !== 'auto' ? quality : undefined,
+            background: backgroundMode !== 'auto' ? backgroundMode : undefined,
+            outputFormat: outputFormat !== 'auto' ? outputFormat : undefined,
             variations,
             enhance: targetEnhance,
             promptEditedManually: targetEditedManually,
@@ -275,10 +517,11 @@ export function StudioApp() {
               : brief.useBackgroundColor
                 ? brief.backgroundColor
                 : undefined,
-            inputReference:
-              selectedModel.supportsReference && referenceImage
-                ? referenceImage
+            inputReferences:
+              targetModel.supportsReference && inputReferences.length > 0
+                ? inputReferences.slice(0, Math.max(1, targetModel.maxReferences))
                 : undefined,
+            baseSeed: parsedSeed,
           }),
         });
 
@@ -287,6 +530,8 @@ export function StudioApp() {
           isModelUnavailable?: boolean;
           promptUsed?: string;
           enhanced?: boolean;
+          modelTier?: ModelTier;
+          actualCost?: number | null;
           images?: Array<{
             index: number;
             dataUrl: string;
@@ -304,7 +549,7 @@ export function StudioApp() {
           if (res.status === 404 || res.status === 410 || payload.isModelUnavailable) {
             setUnavailableModelBanner(
               payload.error ||
-                `Model ${selectedModel.name} returned ${res.status}. Pick another model to continue.`
+                `Model ${targetModel.name} returned ${res.status}. Pick another model to continue.`
             );
           }
           toast.error(payload.error || 'Generation failed');
@@ -317,11 +562,10 @@ export function StudioApp() {
           (brief.useBackgroundColor &&
             brief.backgroundColor.toUpperCase() === '#FFFFFF');
 
-        // Run client-side Packshot Checker on white-background shots
         const processedImages: GeneratedImageItem[] = await Promise.all(
           rawImages.map(async (img) => {
             let packshotCheck = undefined;
-            if (isWhiteBg) {
+            if (isWhiteBg && !isSvgMedia(img.mediaType, img.dataUrl)) {
               try {
                 packshotCheck = await analyzePackshotImage(img.dataUrl);
               } catch {
@@ -346,13 +590,15 @@ export function StudioApp() {
           createdAt: Date.now(),
           brief: { ...brief },
           shotId,
-          modelId,
+          modelId: targetModel.id,
+          modelTier: payload.modelTier ?? targetModel.tier,
           aspectRatio,
           prompt: payload.promptUsed || targetPrompt,
           enhanced: Boolean(payload.enhanced),
           refineChips: targetRefineChips,
           images: processedImages,
           totalCost: payload.totalCost ?? 0,
+          actualCost: payload.actualCost ?? null,
           totalDurationMs: payload.totalDurationMs ?? 0,
         };
 
@@ -377,24 +623,92 @@ export function StudioApp() {
         toast.error('Network error reaching generation endpoint.');
       } finally {
         setIsGenerating(false);
+        setElapsedMs(0);
         setPendingSlots(0);
       }
     },
     [
       isGenerating,
-      brief,
       activePrompt,
       promptEditedManually,
       activeRefineChips,
       enhanceEnabled,
+      customSeed,
       variations,
-      modelId,
       aspectRatio,
+      resolution,
+      quality,
+      backgroundMode,
+      outputFormat,
+      brief,
       selectedShot.isWhiteBackground,
-      selectedModel.supportsReference,
-      selectedModel.name,
-      referenceImage,
+      inputReferences,
       shotId,
+    ]
+  );
+
+  const runGeneration = useCallback(
+    async (override?: PendingGenerationOverride) => {
+      if (isGenerating) return;
+      if (!brief.name.trim()) {
+        toast.error('Please enter a product name or type first.');
+        return;
+      }
+
+      let activeModel = selectedModel;
+
+      // If Free tier is selected and empty, auto-switch to cheapest paid model
+      const freeModels = models.filter((m) => m.tier === 'free');
+      if (settings.modelTier === 'free' && freeModels.length === 0) {
+        const cheapestPaid = getCheapestPaidModel(models);
+        if (!cheapestPaid) {
+          toast.error('No image models are currently available.');
+          return;
+        }
+        activeModel = cheapestPaid;
+        setModelId(cheapestPaid.id);
+        updateSettings({
+          modelTier: 'paid',
+          defaultModel: cheapestPaid.id,
+        });
+        toast.info(
+          `No free models available — switched to ${cheapestPaid.name} (${formatModelPrice(cheapestPaid)})`
+        );
+      }
+
+      if (activeModel.requiresReference && inputReferences.length === 0) {
+        toast.error(`${activeModel.name} requires at least 1 reference photo.`);
+        setInputMode('photo');
+        return;
+      }
+
+      const estimate = formatBatchEstimate(activeModel, variations);
+      if (
+        activeModel.tier === 'paid' &&
+        estimate.exactTotalUsd !== null &&
+        estimate.exactTotalUsd > 0.25
+      ) {
+        setCostConfirmState({
+          open: true,
+          estimateLabel: estimate.label,
+          modelName: activeModel.name,
+          override,
+        });
+        return;
+      }
+
+      await executeGeneration(activeModel, override);
+    },
+    [
+      isGenerating,
+      brief.name,
+      selectedModel,
+      models,
+      settings.modelTier,
+      inputReferences.length,
+      variations,
+      updateSettings,
+      executeGeneration,
     ]
   );
 
@@ -477,17 +791,27 @@ export function StudioApp() {
     toast.success('Image removed');
   }, []);
 
-  const handleRemixRecord = useCallback((record: GenerationRecord) => {
-    setBrief(record.brief);
-    setShotId(record.shotId);
-    setModelId(record.modelId);
-    setAspectRatio(record.aspectRatio);
-    setActiveRefineChips(record.refineChips ?? []);
-    setManualPromptText(record.prompt);
-    setPromptEditedManually(true);
-    setActiveTab('generate');
-    toast.success(`Loaded "${record.brief.name}" into Studio`);
-  }, []);
+  const handleRemixRecord = useCallback(
+    (record: GenerationRecord) => {
+      const recModel = findModelById(models, record.modelId);
+      const targetTier: ModelTier =
+        record.modelTier ??
+        recModel?.tier ??
+        (record.modelId.endsWith(':free') ? 'free' : 'paid');
+
+      setBrief(record.brief);
+      setShotId(record.shotId);
+      setModelId(record.modelId);
+      updateSettings({ modelTier: targetTier });
+      setAspectRatio(record.aspectRatio);
+      setActiveRefineChips(record.refineChips ?? []);
+      setManualPromptText(record.prompt);
+      setPromptEditedManually(true);
+      setActiveTab('generate');
+      toast.success(`Loaded "${record.brief.name}" into Studio`);
+    },
+    [models, updateSettings]
+  );
 
   const handleClearLibrary = useCallback(() => {
     setHistory([]);
@@ -505,7 +829,12 @@ export function StudioApp() {
         return;
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-        if (activeTab === 'generate' && !commandPaletteOpen && !lightboxState.open) {
+        if (
+          activeTab === 'generate' &&
+          !commandPaletteOpen &&
+          !lightboxState.open &&
+          !costConfirmState.open
+        ) {
           e.preventDefault();
           void runGeneration();
         }
@@ -513,7 +842,13 @@ export function StudioApp() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [activeTab, commandPaletteOpen, lightboxState.open, runGeneration]);
+  }, [
+    activeTab,
+    commandPaletteOpen,
+    lightboxState.open,
+    costConfirmState.open,
+    runGeneration,
+  ]);
 
   const totalSavedImages = useMemo(
     () => history.reduce((sum, r) => sum + r.images.length, 0),
@@ -529,6 +864,26 @@ export function StudioApp() {
         currentRecord.brief.backgroundColor.toUpperCase() === '#FFFFFF')
     );
   }, [currentRecord]);
+
+  const hasExplicitParam = useCallback(
+    (param: string) => selectedModel.supportedParams.includes(param),
+    [selectedModel.supportedParams]
+  );
+
+  const batchEstimate = useMemo(
+    () => formatBatchEstimate(selectedModel, variations),
+    [selectedModel, variations]
+  );
+
+  const showSlowModelHint =
+    (selectedModel.priceUsd !== null && selectedModel.priceUsd > 0.1) ||
+    (isGenerating && elapsedMs >= 20_000);
+
+  const currentRecordModel = useMemo(
+    () =>
+      currentRecord ? findModelById(models, currentRecord.modelId) : undefined,
+    [currentRecord, models]
+  );
 
   return (
     <div className="min-h-screen flex flex-col bg-[var(--background)] text-[var(--foreground)]">
@@ -577,8 +932,10 @@ export function StudioApp() {
                     }
                   }}
                   selectedModel={selectedModel}
-                  referenceImage={referenceImage}
-                  onReferenceImageChange={setReferenceImage}
+                  inputMode={inputMode}
+                  onInputModeChange={handleInputModeChange}
+                  inputReferences={inputReferences}
+                  onInputReferencesChange={setInputReferences}
                   isWhiteBackgroundPreset={selectedShot.isWhiteBackground}
                 />
               </section>
@@ -630,76 +987,190 @@ export function StudioApp() {
 
               <hr className="border-[var(--border)]" />
 
-              {/* Section 3: Model, Aspect Ratio, Variations, Enhance */}
+              {/* Section 3: Model & Output (Dynamic Tier + Capability-Driven Controls) */}
               <section className="space-y-4">
                 <h2 className="text-[14px] font-semibold tracking-[-0.02em] text-[var(--foreground)]">
-                  3. Model & Output
+                  3. Model &amp; Output
                 </h2>
 
-                <div className="space-y-1.5">
-                  <Label htmlFor="model-select">Generation model</Label>
-                  <Select
-                    value={modelId}
-                    onValueChange={(val) => {
-                      setModelId(val);
-                      setUnavailableModelBanner(null);
-                    }}
-                  >
-                    <SelectTrigger id="model-select">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {models.map((m) => (
-                        <SelectItem key={m.id} value={m.id}>
-                          {m.name} — {m.priceLabel}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                <ModelSelector
+                  models={models}
+                  tier={settings.modelTier}
+                  onTierChange={handleTierChange}
+                  selectedModelId={modelId}
+                  onSelectModel={(id) => handleSelectModel(id, false)}
+                  inputMode={inputMode}
+                  discoveryStatus={discoveryStatus}
+                  isLoadingModels={isLoadingModels}
+                  onRetryDiscovery={handleRefreshModels}
+                  compact
+                />
 
-                  <div className="rounded-[8px] border border-[var(--border)] bg-[var(--surface)] p-2.5 text-[12px]">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <span className="font-mono text-[11px] text-[var(--foreground)] tabular-nums">
-                        {selectedModel.priceLabel} · {selectedModel.maxResolution} ·{' '}
-                        {selectedModel.latencyHint}
-                      </span>
-                      {selectedModel.badge ? (
-                        <span className="rounded-[4px] border border-[var(--border)] bg-[var(--card)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--foreground)]">
-                          {selectedModel.badge}
-                        </span>
-                      ) : null}
+                {/* Aspect Ratio Chips (only when supported_parameters includes aspect_ratio) */}
+                {hasExplicitParam('aspect_ratio') ? (
+                  <div className="space-y-1.5">
+                    <Label>Aspect ratio</Label>
+                    <div className="grid grid-cols-5 gap-1.5">
+                      {ASPECT_RATIOS.map((ar) => {
+                        const isSupported =
+                          !selectedModel.supportedAspectRatios ||
+                          selectedModel.supportedAspectRatios.includes(ar.value);
+                        const active = aspectRatio === ar.value;
+                        return (
+                          <button
+                            key={ar.value}
+                            type="button"
+                            onClick={() => applyAspectRatioWithClamp(ar.value, selectedModel)}
+                            title={
+                              isSupported
+                                ? ar.hint
+                                : `${ar.label} unsupported by model (clamps automatically)`
+                            }
+                            className={cn(
+                              'h-8 rounded-[6px] border font-mono text-[12px] transition-colors duration-150 cursor-pointer whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3]',
+                              active
+                                ? 'border-[var(--foreground)] bg-[var(--foreground)] text-[var(--background)] font-medium'
+                                : isSupported
+                                  ? 'border-[var(--border)] bg-[var(--surface)] text-[var(--foreground)] hover:border-[var(--border-hover)]'
+                                  : 'border-[var(--border)] bg-[var(--surface)] text-[var(--muted-foreground)] opacity-55 hover:border-[var(--border-hover)]'
+                            )}
+                          >
+                            {ar.label}
+                          </button>
+                        );
+                      })}
                     </div>
-                    <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted-foreground)]">
-                      {selectedModel.note}
-                    </p>
+                    {clampedRatioNote ? (
+                      <p className="text-[11px] text-amber-500">{clampedRatioNote}</p>
+                    ) : null}
                   </div>
-                </div>
+                ) : null}
 
-                {/* Aspect Ratio Chips */}
-                <div className="space-y-1.5">
-                  <Label>Aspect ratio</Label>
-                  <div className="grid grid-cols-5 gap-1.5">
-                    {ASPECT_RATIOS.map((ar) => {
-                      const active = aspectRatio === ar.value;
-                      return (
-                        <button
-                          key={ar.value}
-                          type="button"
-                          onClick={() => setAspectRatio(ar.value)}
-                          title={ar.hint}
-                          className={cn(
-                            'h-8 rounded-[6px] border font-mono text-[12px] transition-colors duration-150 cursor-pointer whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3]',
-                            active
-                              ? 'border-[var(--foreground)] bg-[var(--foreground)] text-[var(--background)] font-medium'
-                              : 'border-[var(--border)] bg-[var(--surface)] text-[var(--foreground)] hover:border-[var(--border-hover)]'
-                          )}
+                {/* Dynamic Capability Controls: resolution, quality, background, output_format, seed */}
+                {hasExplicitParam('resolution') ||
+                hasExplicitParam('quality') ||
+                hasExplicitParam('background') ||
+                hasExplicitParam('output_format') ||
+                hasExplicitParam('seed') ? (
+                  <div className="grid grid-cols-2 gap-2.5">
+                    {hasExplicitParam('resolution') ? (
+                      <div className="space-y-1">
+                        <Label htmlFor="resolution-select">Resolution</Label>
+                        <Select value={resolution} onValueChange={setResolution}>
+                          <SelectTrigger id="resolution-select" className="h-8 text-[12px]">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="auto">Auto</SelectItem>
+                            {(selectedModel.supportedResolutions ?? ['1K', '2K']).map(
+                              (resOpt) => (
+                                <SelectItem key={resOpt} value={resOpt}>
+                                  {resOpt}
+                                </SelectItem>
+                              )
+                            )}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    ) : null}
+
+                    {hasExplicitParam('quality') ? (
+                      <div className="space-y-1">
+                        <Label htmlFor="quality-select">Quality</Label>
+                        <Select value={quality} onValueChange={setQuality}>
+                          <SelectTrigger id="quality-select" className="h-8 text-[12px]">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="auto">Auto</SelectItem>
+                            {(selectedModel.supportedQualities ?? ['low', 'medium', 'high']).map(
+                              (qOpt) => (
+                                <SelectItem key={qOpt} value={qOpt}>
+                                  {qOpt}
+                                </SelectItem>
+                              )
+                            )}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    ) : null}
+
+                    {hasExplicitParam('background') ? (
+                      <div className="space-y-1">
+                        <Label htmlFor="background-select">Background</Label>
+                        <Select
+                          value={backgroundMode}
+                          onValueChange={(val) =>
+                            setBackgroundMode(val as 'auto' | 'opaque' | 'transparent')
+                          }
                         >
-                          {ar.label}
-                        </button>
-                      );
-                    })}
+                          <SelectTrigger id="background-select" className="h-8 text-[12px]">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="auto">Auto</SelectItem>
+                            {(selectedModel.supportedBackgrounds ?? ['opaque', 'transparent']).map(
+                              (bgOpt) => (
+                                <SelectItem key={bgOpt} value={bgOpt}>
+                                  {bgOpt}
+                                </SelectItem>
+                              )
+                            )}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    ) : null}
+
+                    {hasExplicitParam('output_format') ? (
+                      <div className="space-y-1">
+                        <Label htmlFor="output-format-select">Format</Label>
+                        <Select
+                          value={outputFormat}
+                          onValueChange={(val) =>
+                            setOutputFormat(
+                              val as 'auto' | 'png' | 'webp' | 'jpeg' | 'svg'
+                            )
+                          }
+                        >
+                          <SelectTrigger id="output-format-select" className="h-8 text-[12px]">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="auto">Auto</SelectItem>
+                            {(selectedModel.supportedOutputFormats ?? ['png', 'webp', 'jpeg'])
+                              .filter((f) => ['png', 'webp', 'jpeg', 'svg'].includes(f.toLowerCase()))
+                              .map((fmt) => (
+                                <SelectItem key={fmt} value={fmt.toLowerCase()}>
+                                  {fmt.toUpperCase()}
+                                </SelectItem>
+                              ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    ) : null}
+
+                    {hasExplicitParam('seed') ? (
+                      <div className="space-y-1">
+                        <Label htmlFor="seed-input">Seed (optional)</Label>
+                        <Input
+                          id="seed-input"
+                          value={customSeed}
+                          onChange={(e) =>
+                            setCustomSeed(e.target.value.replace(/[^0-9]/g, '').slice(0, 9))
+                          }
+                          placeholder="Random"
+                          className="h-8 font-mono text-[12px]"
+                        />
+                      </div>
+                    ) : null}
                   </div>
-                </div>
+                ) : null}
+
+                {selectedModel.supportedParams.length === 0 ? (
+                  <p className="text-[11px] text-[var(--muted-foreground)]">
+                    This model uses prompt-only generation (no extra parameters).
+                  </p>
+                ) : null}
 
                 {/* Variations (1..4) & Enhance with AI switch */}
                 <div className="grid grid-cols-2 gap-3">
@@ -792,22 +1263,37 @@ export function StudioApp() {
                 ) : null}
               </section>
 
-              {/* Desktop Generate CTA */}
-              <div className="hidden lg:block pt-2">
-                <Button
-                  type="button"
-                  size="lg"
-                  disabled={isGenerating}
-                  onClick={() => void runGeneration()}
-                  className="w-full justify-between"
-                >
-                  <span>
-                    {isGenerating
-                      ? `Generating ${pendingSlots} ${pendingSlots === 1 ? 'shot' : 'shots'}...`
-                      : `Generate ${variations} ${variations === 1 ? 'shot' : 'shots'}`}
-                  </span>
-                  <kbd className="font-mono text-[11px] opacity-75">⌘↵</kbd>
-                </Button>
+              {/* Desktop Generate CTA + Cost Estimate & Slow Hint */}
+              <div className="hidden lg:block space-y-2 pt-1">
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    size="lg"
+                    disabled={isGenerating}
+                    onClick={() => void runGeneration()}
+                    className="flex-1 justify-between"
+                  >
+                    <span>
+                      {isGenerating
+                        ? `Generating ${pendingSlots} ${pendingSlots === 1 ? 'shot' : 'shots'}...`
+                        : `Generate ${variations} ${variations === 1 ? 'shot' : 'shots'}`}
+                    </span>
+                    <kbd className="font-mono text-[11px] opacity-75">⌘↵</kbd>
+                  </Button>
+
+                  {selectedModel.tier === 'paid' ? (
+                    <span className="inline-flex h-10 items-center rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-2.5 font-mono text-[11px] tabular-nums text-[var(--muted-foreground)] whitespace-nowrap shrink-0">
+                      {batchEstimate.label}
+                    </span>
+                  ) : null}
+                </div>
+
+                {showSlowModelHint ? (
+                  <p className="flex items-center gap-1.5 text-[11px] text-[var(--muted-foreground)]">
+                    <Clock className="h-3 w-3 shrink-0" />
+                    <span>This model can take over a minute</span>
+                  </p>
+                ) : null}
               </div>
             </aside>
 
@@ -828,11 +1314,17 @@ export function StudioApp() {
                       size="sm"
                       variant="secondary"
                       onClick={() => {
-                        setModelId('recraft/recraft-v4.1-flash');
+                        const fallback =
+                          getCheapestPaidModel(models) ??
+                          models.find((m) => m.id !== modelId);
+                        if (fallback) {
+                          updateSettings({ modelTier: fallback.tier });
+                          handleSelectModel(fallback.id, true);
+                        }
                         setUnavailableModelBanner(null);
                       }}
                     >
-                      Switch to v4.1 Flash
+                      Pick another model
                     </Button>
                     <Button
                       size="sm"
@@ -851,7 +1343,9 @@ export function StudioApp() {
                   {isGenerating ? (
                     <span className="inline-flex items-center gap-2 rounded-[6px] border border-[var(--border)] bg-[var(--card)] px-2.5 py-1 text-[12px] text-[var(--foreground)]">
                       <span className="h-2 w-2 rounded-full bg-[#0070f3]" />
-                      <span>Generating {pendingSlots}</span>
+                      <span className="font-mono tabular-nums">
+                        Generating {pendingSlots} · {(elapsedMs / 1000).toFixed(1)}s
+                      </span>
                     </span>
                   ) : currentRecord ? (
                     <span className="inline-flex items-center gap-2 rounded-[6px] border border-[var(--border)] bg-[var(--card)] px-2.5 py-1 text-[12px] text-[var(--foreground)]">
@@ -862,16 +1356,24 @@ export function StudioApp() {
 
                   {currentRecord && !isGenerating ? (
                     <span className="font-mono text-[12px] tabular-nums text-[var(--muted-foreground)]">
-                      {currentRecord.totalCost > 0
-                        ? `$${currentRecord.totalCost.toFixed(3)}`
-                        : 'Free'}{' '}
+                      {currentRecord.actualCost !== null &&
+                      currentRecord.actualCost !== undefined
+                        ? `$${currentRecord.actualCost.toFixed(4)}`
+                        : currentRecord.totalCost > 0
+                          ? `~$${currentRecord.totalCost.toFixed(3)}`
+                          : 'Free'}{' '}
                       · {(currentRecord.totalDurationMs / 1000).toFixed(1)}s total ·{' '}
-                      {getModelSpec(currentRecord.modelId).shortName}
+                      {currentRecordModel?.name ?? currentRecord.modelId}
                     </span>
                   ) : null}
                 </div>
 
-                {currentRecord && currentRecord.enhanced ? (
+                {showSlowModelHint && isGenerating ? (
+                  <span className="flex items-center gap-1.5 font-mono text-[11px] text-[var(--muted-foreground)]">
+                    <Clock className="h-3 w-3 shrink-0" />
+                    <span>This model can take over a minute</span>
+                  </span>
+                ) : currentRecord && currentRecord.enhanced ? (
                   <span className="font-mono text-[11px] text-[var(--muted-foreground)]">
                     AI-enhanced prompt applied
                   </span>
@@ -900,10 +1402,15 @@ export function StudioApp() {
                       key={idx}
                       className="overflow-hidden rounded-[12px] border border-[var(--border)] bg-[var(--card)]"
                     >
-                      <div className="skeleton-shimmer relative aspect-square w-full bg-[var(--surface)] border-b border-[var(--border)] flex items-center justify-center">
-                        <span className="font-mono text-[12px] text-[var(--muted-foreground)]">
-                          Rendering variation {idx + 1}...
+                      <div className="skeleton-shimmer relative aspect-square w-full bg-[var(--surface)] border-b border-[var(--border)] flex flex-col items-center justify-center gap-1.5 px-4 text-center">
+                        <span className="font-mono text-[12px] tabular-nums text-[var(--foreground)]">
+                          Rendering variation {idx + 1} · {(elapsedMs / 1000).toFixed(1)}s
                         </span>
+                        {showSlowModelHint ? (
+                          <span className="text-[11px] text-[var(--muted-foreground)]">
+                            This model can take over a minute
+                          </span>
+                        ) : null}
                       </div>
                       <div className="p-3.5 space-y-2.5">
                         <div className="h-4 w-2/3 rounded-[4px] bg-[var(--surface)]" />
@@ -947,7 +1454,6 @@ export function StudioApp() {
                 </div>
               ) : (
                 <div className="relative flex flex-1 min-h-[460px] flex-col items-center justify-center overflow-hidden rounded-[12px] border border-[var(--border)] bg-[var(--card)]/90 p-8 text-center">
-                  {/* Faint radial glow permitted on empty state */}
                   <div
                     aria-hidden="true"
                     className="pointer-events-none absolute inset-0"
@@ -992,22 +1498,30 @@ export function StudioApp() {
 
             {/* Mobile Sticky Generate Bar */}
             <div className="fixed inset-x-0 bottom-0 z-30 border-t border-[var(--border)] bg-[var(--background)]/95 p-3 backdrop-blur-sm lg:hidden">
-              <Button
-                type="button"
-                size="lg"
-                disabled={isGenerating}
-                onClick={() => void runGeneration()}
-                className="w-full"
-              >
-                {isGenerating
-                  ? `Generating ${pendingSlots} ${pendingSlots === 1 ? 'shot' : 'shots'}...`
-                  : `Generate ${variations} ${variations === 1 ? 'shot' : 'shots'}`}
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  size="lg"
+                  disabled={isGenerating}
+                  onClick={() => void runGeneration()}
+                  className="flex-1"
+                >
+                  {isGenerating
+                    ? `Generating ${pendingSlots} (${(elapsedMs / 1000).toFixed(0)}s)...`
+                    : `Generate ${variations} ${variations === 1 ? 'shot' : 'shots'}`}
+                </Button>
+                {selectedModel.tier === 'paid' ? (
+                  <span className="inline-flex h-10 items-center rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-2.5 font-mono text-[11px] tabular-nums text-[var(--muted-foreground)] whitespace-nowrap shrink-0">
+                    {batchEstimate.label}
+                  </span>
+                ) : null}
+              </div>
             </div>
           </div>
         ) : activeTab === 'library' ? (
           <LibraryView
             records={history}
+            models={models}
             onRemixRecord={handleRemixRecord}
             onToggleFavorite={handleToggleFavorite}
             onDeleteImage={handleDeleteImage}
@@ -1022,10 +1536,68 @@ export function StudioApp() {
             settings={settings}
             onUpdateSettings={updateSettings}
             models={models}
+            onTierChange={handleTierChange}
+            onSelectDefaultModel={(id) => handleSelectModel(id, true)}
+            inputMode={inputMode}
+            discoveryStatus={discoveryStatus}
+            isLoadingModels={isLoadingModels}
+            isRefreshingModels={isRefreshingModels}
+            onRefreshModels={handleRefreshModels}
             serverStatus={serverStatus}
           />
         )}
       </main>
+
+      {/* Cost Guard Confirmation Dialog (> $0.25) */}
+      <StudioModal
+        open={costConfirmState.open}
+        onOpenChange={(open) =>
+          setCostConfirmState((prev) => ({ ...prev, open }))
+        }
+        title="Confirm paid generation cost"
+        className="max-w-md p-5"
+      >
+        <div className="space-y-4">
+          <div className="space-y-1.5 pr-6">
+            <h2 className="text-[16px] font-semibold tracking-[-0.02em] text-[var(--foreground)]">
+              Confirm batch cost
+            </h2>
+            <p className="text-[13px] leading-relaxed text-[var(--muted-foreground)]">
+              Generating <span className="font-mono text-[var(--foreground)]">{variations}</span>{' '}
+              {variations === 1 ? 'variation' : 'variations'} with{' '}
+              <span className="font-medium text-[var(--foreground)]">
+                {costConfirmState.modelName}
+              </span>{' '}
+              is estimated at{' '}
+              <span className="font-mono font-medium text-[var(--foreground)]">
+                {costConfirmState.estimateLabel}
+              </span>
+              .
+            </p>
+          </div>
+
+          <div className="flex items-center justify-end gap-2 border-t border-[var(--border)] pt-3">
+            <Button
+              variant="secondary"
+              onClick={() =>
+                setCostConfirmState((prev) => ({ ...prev, open: false }))
+              }
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="default"
+              onClick={() => {
+                const override = costConfirmState.override;
+                setCostConfirmState((prev) => ({ ...prev, open: false }));
+                void executeGeneration(selectedModel, override);
+              }}
+            >
+              Confirm &amp; Generate
+            </Button>
+          </div>
+        </div>
+      </StudioModal>
 
       {/* Lightbox Modal */}
       {lightboxState.record ? (
@@ -1037,7 +1609,12 @@ export function StudioApp() {
           onIndexChange={(index) => setLightboxState((prev) => ({ ...prev, index }))}
           productName={lightboxState.record.brief.name}
           prompt={lightboxState.record.prompt}
-          modelName={getModelSpec(lightboxState.record.modelId).name}
+          modelId={lightboxState.record.modelId}
+          modelName={
+            findModelById(models, lightboxState.record.modelId)?.name ??
+            lightboxState.record.modelId
+          }
+          modelTier={lightboxState.record.modelTier}
           isWhiteBackgroundShot={
             getShotPreset(lightboxState.record.shotId).isWhiteBackground ||
             (lightboxState.record.brief.useBackgroundColor &&

@@ -1,23 +1,34 @@
 'use client';
 
 import React from 'react';
-import { ASPECT_RATIOS, type AspectRatio, type ModelSpec } from '@/lib/models';
+import { RefreshCw } from 'lucide-react';
+import {
+  ASPECT_RATIOS,
+  type AspectRatio,
+  type ModelTier,
+  type NormalizedImageModel,
+} from '@/lib/models';
 import type { StudioSettings } from '@/lib/db';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
+import { Button } from '@/components/ui/button';
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
+  ModelSelector,
+  type DiscoveryStatus,
+} from '@/components/model-selector';
 import { cn } from '@/lib/utils';
 
 interface SettingsViewProps {
   settings: StudioSettings;
   onUpdateSettings: (patch: Partial<StudioSettings>) => void;
-  models: ModelSpec[];
+  models: NormalizedImageModel[];
+  onTierChange: (tier: ModelTier) => void;
+  onSelectDefaultModel: (modelId: string) => void;
+  inputMode: 'text' | 'photo';
+  discoveryStatus: DiscoveryStatus;
+  isLoadingModels: boolean;
+  isRefreshingModels: boolean;
+  onRefreshModels: () => void;
   serverStatus: {
     hasApiKey: boolean;
     enhancerModel: string;
@@ -28,6 +39,13 @@ export function SettingsView({
   settings,
   onUpdateSettings,
   models,
+  onTierChange,
+  onSelectDefaultModel,
+  inputMode,
+  discoveryStatus,
+  isLoadingModels,
+  isRefreshingModels,
+  onRefreshModels,
   serverStatus,
 }: SettingsViewProps) {
   return (
@@ -43,27 +61,40 @@ export function SettingsView({
 
       {/* Default Generation Preferences */}
       <section className="space-y-5 rounded-[12px] border border-[var(--border)] bg-[var(--card)] p-5">
-        <h2 className="text-[14px] font-semibold tracking-[-0.01em] text-[var(--foreground)]">
-          Generation Defaults
-        </h2>
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-[14px] font-semibold tracking-[-0.01em] text-[var(--foreground)]">
+            Generation Defaults
+          </h2>
 
-        <div className="space-y-1.5">
-          <Label htmlFor="default-model">Default model</Label>
-          <Select
-            value={settings.defaultModel}
-            onValueChange={(val) => onUpdateSettings({ defaultModel: val })}
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={isRefreshingModels || isLoadingModels}
+            onClick={onRefreshModels}
           >
-            <SelectTrigger id="default-model">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {models.map((model) => (
-                <SelectItem key={model.id} value={model.id}>
-                  {model.name} ({model.priceLabel})
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+            <RefreshCw
+              className={cn(
+                'h-3.5 w-3.5',
+                (isRefreshingModels || isLoadingModels) && 'animate-spin'
+              )}
+            />
+            <span>{isRefreshingModels ? 'Refreshing...' : 'Refresh models'}</span>
+          </Button>
+        </div>
+
+        <div className="space-y-2">
+          <Label>Model tier &amp; default model</Label>
+          <ModelSelector
+            models={models}
+            tier={settings.modelTier}
+            onTierChange={onTierChange}
+            selectedModelId={settings.defaultModel}
+            onSelectModel={onSelectDefaultModel}
+            inputMode={inputMode}
+            discoveryStatus={discoveryStatus}
+            isLoadingModels={isLoadingModels}
+            onRetryDiscovery={onRefreshModels}
+          />
         </div>
 
         <div className="space-y-2">

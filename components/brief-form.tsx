@@ -1,10 +1,11 @@
 'use client';
 
 import React, { useRef } from 'react';
-import { ImagePlus, Info, Plus, Trash2, X } from 'lucide-react';
+import { ImagePlus, Plus, Trash2, X } from 'lucide-react';
+import { toast } from 'sonner';
 import { PRODUCT_CATEGORIES, type ProductCategoryId } from '@/lib/presets';
 import type { ProductBrief } from '@/lib/prompt-engine';
-import type { ModelSpec } from '@/lib/models';
+import type { NormalizedImageModel } from '@/lib/models';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
@@ -16,19 +17,16 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '@/components/ui/tooltip';
+import { cn } from '@/lib/utils';
 
 interface BriefFormProps {
   brief: ProductBrief;
   onChange: (next: ProductBrief) => void;
-  selectedModel: ModelSpec;
-  referenceImage: string | null;
-  onReferenceImageChange: (dataUrl: string | null) => void;
+  selectedModel: NormalizedImageModel;
+  inputMode: 'text' | 'photo';
+  onInputModeChange: (mode: 'text' | 'photo') => void;
+  inputReferences: string[];
+  onInputReferencesChange: (refs: string[]) => void;
   isWhiteBackgroundPreset: boolean;
 }
 
@@ -36,11 +34,18 @@ export function BriefForm({
   brief,
   onChange,
   selectedModel,
-  referenceImage,
-  onReferenceImageChange,
+  inputMode,
+  onInputModeChange,
+  inputReferences,
+  onInputReferencesChange,
   isWhiteBackgroundPreset,
 }: BriefFormProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const maxAllowedRefs =
+    selectedModel.supportsReference && selectedModel.maxReferences > 0
+      ? selectedModel.maxReferences
+      : 10;
 
   const updateField = <K extends keyof ProductBrief>(key: K, value: ProductBrief[K]) => {
     onChange({ ...brief, [key]: value });
@@ -82,21 +87,156 @@ export function BriefForm({
     );
   };
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        onReferenceImageChange(reader.result);
-      }
-    };
-    reader.readAsDataURL(file);
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
     e.target.value = '';
+    if (files.length === 0) return;
+
+    const remainingSlots = Math.max(0, maxAllowedRefs - inputReferences.length);
+    if (remainingSlots === 0) {
+      toast.error(`Maximum of ${maxAllowedRefs} reference photos reached.`);
+      return;
+    }
+
+    const accepted = files.slice(0, remainingSlots);
+    if (files.length > remainingSlots) {
+      toast.info(`Added ${accepted.length} photos (limit: ${maxAllowedRefs}).`);
+    }
+
+    const readPromises = accepted.map(
+      (file) =>
+        new Promise<string | null>((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () =>
+            resolve(typeof reader.result === 'string' ? reader.result : null);
+          reader.onerror = () => resolve(null);
+          reader.readAsDataURL(file);
+        })
+    );
+
+    const results = (await Promise.all(readPromises)).filter(
+      (x): x is string => Boolean(x)
+    );
+
+    if (results.length > 0) {
+      onInputReferencesChange([...inputReferences, ...results]);
+      if (inputMode !== 'photo') {
+        onInputModeChange('photo');
+      }
+    }
+  };
+
+  const removeReferenceAt = (index: number) => {
+    onInputReferencesChange(inputReferences.filter((_, i) => i !== index));
   };
 
   return (
     <div className="space-y-4">
+      {/* Input Mode Toggle (Text vs Photo) */}
+      <div className="flex items-center justify-between gap-2">
+        <Label>Input mode</Label>
+        <div
+          role="tablist"
+          aria-label="Input mode"
+          className="grid w-44 grid-cols-2 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] p-0.5"
+        >
+          {(['text', 'photo'] as const).map((mode) => {
+            const active = inputMode === mode;
+            return (
+              <button
+                key={mode}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => onInputModeChange(mode)}
+                className={cn(
+                  'h-7 rounded-[5px] px-2.5 text-[12px] font-medium capitalize transition-colors cursor-pointer whitespace-nowrap',
+                  active
+                    ? 'bg-[var(--foreground)] text-[var(--background)]'
+                    : 'text-[var(--muted-foreground)] hover:text-[var(--foreground)]'
+                )}
+              >
+                {mode === 'text' ? 'Text' : 'Photo'}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Reference Photos Uploader — shown in Photo mode or when model supports references */}
+      {inputMode === 'photo' || selectedModel.supportsReference ? (
+        <div className="space-y-2 rounded-[8px] border border-[var(--border)] bg-[var(--surface)] p-3">
+          <div className="flex items-center justify-between gap-2">
+            <Label>
+              Reference photos ({inputReferences.length}/{maxAllowedRefs})
+            </Label>
+            <span className="font-mono text-[11px] text-[var(--muted-foreground)]">
+              {selectedModel.supportsReference
+                ? `up to ${selectedModel.maxReferences} photos`
+                : 'Select reference model below'}
+            </span>
+          </div>
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple={maxAllowedRefs > 1}
+            accept="image/png,image/jpeg,image/webp"
+            onChange={handleFileSelect}
+            className="hidden"
+          />
+
+          {inputReferences.length > 0 ? (
+            <div className="grid grid-cols-4 gap-2">
+              {inputReferences.map((src, idx) => (
+                <div
+                  key={idx}
+                  className="group relative aspect-square overflow-hidden rounded-[6px] border border-[var(--border)] bg-[var(--card)]"
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={src}
+                    alt={`Reference ${idx + 1}`}
+                    referrerPolicy="no-referrer"
+                    className="h-full w-full object-cover"
+                  />
+                  <button
+                    type="button"
+                    aria-label={`Remove reference ${idx + 1}`}
+                    onClick={() => removeReferenceAt(idx)}
+                    className="absolute right-1 top-1 inline-flex h-5 w-5 items-center justify-center rounded-[4px] border border-[var(--border)] bg-[var(--card)]/90 text-[var(--foreground)] hover:text-red-500 cursor-pointer"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              ))}
+
+              {inputReferences.length < maxAllowedRefs ? (
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  aria-label="Add another reference photo"
+                  className="flex aspect-square items-center justify-center rounded-[6px] border border-dashed border-[var(--border)] bg-[var(--card)] text-[var(--muted-foreground)] hover:border-[var(--border-hover)] hover:text-[var(--foreground)] cursor-pointer"
+                >
+                  <Plus className="h-4 w-4" />
+                </button>
+              ) : null}
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="flex h-14 w-full items-center justify-center gap-2 rounded-[6px] border border-dashed border-[var(--border)] bg-[var(--card)] px-3 text-[12px] text-[var(--muted-foreground)] transition-colors hover:border-[var(--border-hover)] hover:text-[var(--foreground)] cursor-pointer"
+            >
+              <ImagePlus className="h-4 w-4 shrink-0" />
+              <span>
+                Upload product photo{maxAllowedRefs > 1 ? `s (up to ${maxAllowedRefs})` : ''}
+              </span>
+            </button>
+          )}
+        </div>
+      ) : null}
+
       {/* Product Name / Type */}
       <div className="space-y-1.5">
         <Label htmlFor="product-name">Product name or type</Label>
@@ -280,83 +420,6 @@ export function BriefForm({
           </p>
         )}
       </div>
-
-      {/* Reference Image Uploader — hidden when selected model doesn't support it, with tooltip explanation */}
-      {selectedModel.supportsReference ? (
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between">
-            <Label>Reference image (1 max)</Label>
-            <span className="font-mono text-[11px] text-[var(--muted-foreground)]">
-              input_references
-            </span>
-          </div>
-
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/png,image/jpeg,image/webp"
-            onChange={handleFileSelect}
-            className="hidden"
-          />
-
-          {referenceImage ? (
-            <div className="flex items-center justify-between gap-3 rounded-[8px] border border-[var(--border)] bg-[var(--surface)] p-2">
-              <div className="flex items-center gap-2.5 min-w-0">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={referenceImage}
-                  alt="Product reference preview"
-                  referrerPolicy="no-referrer"
-                  className="h-11 w-11 rounded-[6px] border border-[var(--border)] object-cover shrink-0"
-                />
-                <div className="min-w-0">
-                  <p className="truncate text-[12px] font-medium text-[var(--foreground)]">
-                    Reference attached
-                  </p>
-                  <p className="text-[11px] text-[var(--muted-foreground)]">
-                    Sent to {selectedModel.shortName}
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                aria-label="Remove reference image"
-                onClick={() => onReferenceImageChange(null)}
-                className="inline-flex h-7 w-7 items-center justify-center rounded-[6px] border border-[var(--border)] text-[var(--muted-foreground)] hover:text-[var(--foreground)] cursor-pointer"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          ) : (
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              className="flex h-16 w-full items-center justify-center gap-2 rounded-[6px] border border-dashed border-[var(--border)] bg-[var(--surface)] px-3 text-[12px] text-[var(--muted-foreground)] transition-colors hover:border-[var(--border-hover)] hover:text-[var(--foreground)] cursor-pointer"
-            >
-              <ImagePlus className="h-4 w-4 shrink-0" />
-              <span>Upload product reference photo (PNG, JPEG, WebP)</span>
-            </button>
-          )}
-        </div>
-      ) : (
-        <TooltipProvider delayDuration={150}>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <div
-                tabIndex={0}
-                className="flex items-center justify-between rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-[12px] text-[var(--muted-foreground)] cursor-help focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3]"
-              >
-                <span>Reference upload unavailable for {selectedModel.shortName}</span>
-                <Info className="h-3.5 w-3.5 shrink-0" />
-              </div>
-            </TooltipTrigger>
-            <TooltipContent>
-              {selectedModel.shortName} is text-to-image only. Switch to Recraft v4.1 Utility or
-              Utility Pro to unlock single reference image guidance.
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
-      )}
     </div>
   );
 }

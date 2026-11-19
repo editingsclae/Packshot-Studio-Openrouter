@@ -1,6 +1,10 @@
 import { get, set } from 'idb-keyval';
 import JSZip from 'jszip';
-import { DEFAULT_MODEL_ID, type AspectRatio } from './models';
+import {
+  DEFAULT_FREE_MODEL_ID,
+  type AspectRatio,
+  type ModelTier,
+} from './models';
 import type { ProductBrief } from './prompt-engine';
 import type { ShotPresetId } from './presets';
 import type { PackshotCheckResult } from './packshot-check';
@@ -22,16 +26,19 @@ export interface GenerationRecord {
   brief: ProductBrief;
   shotId: ShotPresetId;
   modelId: string;
+  modelTier?: ModelTier;
   aspectRatio: AspectRatio;
   prompt: string;
   enhanced: boolean;
   refineChips: string[];
   images: GeneratedImageItem[];
   totalCost: number;
+  actualCost?: number | null;
   totalDurationMs: number;
 }
 
 export interface StudioSettings {
+  modelTier: ModelTier;
   defaultModel: string;
   defaultAspectRatio: AspectRatio;
   showPromptInspector: boolean;
@@ -39,7 +46,8 @@ export interface StudioSettings {
 }
 
 export const DEFAULT_SETTINGS: StudioSettings = {
-  defaultModel: DEFAULT_MODEL_ID,
+  modelTier: 'free',
+  defaultModel: DEFAULT_FREE_MODEL_ID,
   defaultAspectRatio: '1:1',
   showPromptInspector: true,
   theme: 'dark',
@@ -59,7 +67,6 @@ export async function loadHistory(): Promise<GenerationRecord[]> {
 
 export async function saveHistory(records: GenerationRecord[]): Promise<void> {
   try {
-    // Keep up to 100 latest generation batches in IndexedDB
     await set(HISTORY_KEY, records.slice(0, 100));
   } catch {
     // Ignore storage quota issues gracefully
@@ -84,14 +91,34 @@ export async function saveSettings(settings: StudioSettings): Promise<void> {
   }
 }
 
+export function isSvgMedia(mediaType?: string, dataUrl?: string): boolean {
+  if (mediaType && mediaType.toLowerCase().includes('svg')) return true;
+  if (dataUrl && dataUrl.toLowerCase().startsWith('data:image/svg+xml')) return true;
+  return false;
+}
+
 /**
- * Converts a dataUrl to PNG, WebP, or JPEG via offscreen canvas and triggers file download.
+ * Downloads a dataUrl directly as SVG or converts via offscreen canvas to PNG/WebP/JPEG.
  */
 export async function downloadImageAs(
   dataUrl: string,
   filenameBase: string,
-  format: 'png' | 'webp' | 'jpeg'
+  format: 'png' | 'webp' | 'jpeg' | 'svg'
 ): Promise<void> {
+  if (format === 'svg') {
+    const res = await fetch(dataUrl);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${filenameBase}.svg`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    return;
+  }
+
   const mime =
     format === 'png' ? 'image/png' : format === 'webp' ? 'image/webp' : 'image/jpeg';
 
@@ -104,8 +131,8 @@ export async function downloadImageAs(
   });
 
   const canvas = document.createElement('canvas');
-  canvas.width = img.naturalWidth || img.width;
-  canvas.height = img.naturalHeight || img.height;
+  canvas.width = img.naturalWidth || img.width || 1024;
+  canvas.height = img.naturalHeight || img.height || 1024;
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('Canvas unavailable');
 
@@ -113,7 +140,7 @@ export async function downloadImageAs(
     ctx.fillStyle = '#FFFFFF';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
   }
-  ctx.drawImage(img, 0, 0);
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
   const blob = await new Promise<Blob | null>((resolve) =>
     canvas.toBlob(resolve, mime, format === 'png' ? undefined : 0.94)
@@ -133,6 +160,7 @@ export async function downloadImageAs(
 function extensionFromDataUrl(dataUrl: string, mediaType?: string): string {
   const mimeMatch = dataUrl.match(/^data:([^;]+);/i);
   const mime = (mimeMatch?.[1] || mediaType || 'image/png').toLowerCase();
+  if (mime.includes('svg')) return 'svg';
   if (mime.includes('webp')) return 'webp';
   if (mime.includes('jpeg') || mime.includes('jpg')) return 'jpg';
   return 'png';

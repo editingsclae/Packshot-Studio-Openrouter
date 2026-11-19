@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { MODEL_CATALOG } from '@/lib/models';
-import { fetchAvailableImageModels, getSupportedParameters } from '@/lib/openrouter';
+import { discoverNormalizedModels } from '@/lib/openrouter';
 import { checkRateLimit, getClientIp } from '@/lib/rate-limit';
 
+export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 
 export async function GET(req: NextRequest) {
@@ -15,25 +15,26 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const liveModels = await fetchAvailableImageModels();
-  const liveMap = new Map(liveModels.map((m) => [m.id, m]));
+  const bypassCache =
+    req.nextUrl.searchParams.get('refresh') === '1' ||
+    req.nextUrl.searchParams.get('bypassCache') === '1';
 
-  // Resolve cached supported_parameters for each curated catalog model in parallel
-  const enriched = await Promise.all(
-    MODEL_CATALOG.map(async (spec) => {
-      const supportedParameters = await getSupportedParameters(spec.id);
-      const liveMatch = liveMap.get(spec.id) || liveMap.get(spec.id.split(':')[0]);
-      return {
-        ...spec,
-        supportedParameters,
-        isAvailable: liveModels.length > 0 ? Boolean(liveMatch) : true,
-      };
-    })
+  const result = await discoverNormalizedModels({ bypassCache });
+
+  return NextResponse.json(
+    {
+      models: result.models,
+      source: result.source,
+      updatedAt: result.updatedAt,
+      ...(result.error ? { error: result.error } : {}),
+      failedCount: result.failedCount,
+      hasApiKey: Boolean(process.env.OPENROUTER_API_KEY),
+      enhancerModel: process.env.OPENROUTER_ENHANCER_MODEL || 'openai/gpt-4o-mini',
+    },
+    {
+      headers: {
+        'Cache-Control': 'no-store',
+      },
+    }
   );
-
-  return NextResponse.json({
-    models: enriched,
-    hasApiKey: Boolean(process.env.OPENROUTER_API_KEY),
-    enhancerModel: process.env.OPENROUTER_ENHANCER_MODEL || 'openai/gpt-4o-mini',
-  });
 }

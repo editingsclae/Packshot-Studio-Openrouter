@@ -6,6 +6,7 @@ import {
   Copy,
   Download,
   Heart,
+  Info,
   Maximize2,
   RefreshCw,
   Shuffle,
@@ -14,7 +15,11 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { REFINE_CHIPS } from '@/lib/presets';
-import { downloadImageAs, type GeneratedImageItem } from '@/lib/db';
+import {
+  downloadImageAs,
+  isSvgMedia,
+  type GeneratedImageItem,
+} from '@/lib/db';
 import { cn } from '@/lib/utils';
 
 interface ImageResultCardProps {
@@ -42,7 +47,11 @@ export function ImageResultCard({
   onRegenerateFailedCheck,
   isGenerating,
 }: ImageResultCardProps) {
-  const [downloadingFormat, setDownloadingFormat] = useState<'png' | 'webp' | 'jpeg' | null>(null);
+  const [downloadingFormat, setDownloadingFormat] = useState<
+    'png' | 'webp' | 'jpeg' | 'svg' | null
+  >(null);
+
+  const isSvg = isSvgMedia(image.mediaType, image.dataUrl);
 
   const safeSlug =
     productName
@@ -50,10 +59,14 @@ export function ImageResultCard({
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/(^-|-$)/g, '') || 'packshot';
 
-  const handleDownload = async (format: 'png' | 'webp' | 'jpeg') => {
+  const handleDownload = async (format: 'png' | 'webp' | 'jpeg' | 'svg') => {
     try {
       setDownloadingFormat(format);
-      await downloadImageAs(image.dataUrl, `${safeSlug}-${image.seed ?? image.id.slice(0, 6)}`, format);
+      await downloadImageAs(
+        image.dataUrl,
+        `${safeSlug}-${image.seed ?? image.id.slice(0, 6)}`,
+        format
+      );
       toast.success(`Exported ${format.toUpperCase()}`);
     } catch {
       toast.error('Failed to export image');
@@ -66,12 +79,13 @@ export function ImageResultCard({
     try {
       const res = await fetch(image.dataUrl);
       const blob = await res.blob();
-      if (navigator.clipboard && typeof ClipboardItem !== 'undefined') {
+      if (navigator.clipboard && typeof ClipboardItem !== 'undefined' && !isSvg) {
         await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
         toast.success('Image copied to clipboard');
       } else {
-        await navigator.clipboard.writeText(image.dataUrl);
-        toast.success('Image data URL copied');
+        const text = isSvg ? await blob.text() : image.dataUrl;
+        await navigator.clipboard.writeText(text);
+        toast.success(isSvg ? 'SVG markup copied' : 'Image data URL copied');
       }
     } catch {
       toast.error('Clipboard write blocked by browser');
@@ -79,7 +93,11 @@ export function ImageResultCard({
   };
 
   const check = image.packshotCheck;
-  const checkFailed = isWhiteBackgroundShot && check && !check.overallPass;
+  const checkFailed = !isSvg && isWhiteBackgroundShot && check && !check.overallPass;
+
+  const downloadFormats: ('svg' | 'png' | 'webp' | 'jpeg')[] = isSvg
+    ? ['svg', 'png', 'webp', 'jpeg']
+    : ['png', 'webp', 'jpeg'];
 
   return (
     <article className="group flex flex-col overflow-hidden rounded-[12px] border border-[var(--border)] bg-[var(--card)] transition-colors duration-150 hover:border-[var(--border-hover)]">
@@ -126,8 +144,13 @@ export function ImageResultCard({
 
       {/* Card Body */}
       <div className="flex flex-1 flex-col gap-3 p-3.5">
-        {/* Packshot Checker Badges (white-background shots only) */}
-        {isWhiteBackgroundShot && check ? (
+        {/* Packshot Checker Badges (white-background shots) or SVG skip note */}
+        {isWhiteBackgroundShot && isSvg ? (
+          <div className="flex items-center gap-1.5 border-b border-[var(--border)] pb-2.5 text-[11px] text-[var(--muted-foreground)]">
+            <Info className="h-3.5 w-3.5 shrink-0" />
+            <span>SVG output — canvas packshot check skipped</span>
+          </div>
+        ) : isWhiteBackgroundShot && check ? (
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border)] pb-2.5">
             <div className="flex flex-wrap items-center gap-2 text-[11px]">
               <span
@@ -201,7 +224,7 @@ export function ImageResultCard({
         {/* Mono Telemetry + Actions Row */}
         <div className="mt-auto flex flex-wrap items-center justify-between gap-2 pt-1">
           <div className="flex items-center gap-1.5 font-mono text-[11px] tabular-nums text-[var(--muted-foreground)]">
-            <span>{image.cost !== null ? `$${image.cost.toFixed(3)}` : 'Free'}</span>
+            <span>{image.cost !== null ? `$${image.cost.toFixed(4)}` : 'usage n/a'}</span>
             <span aria-hidden="true">·</span>
             <span>{(image.durationMs / 1000).toFixed(1)}s</span>
             {typeof image.seed === 'number' ? (
@@ -212,8 +235,8 @@ export function ImageResultCard({
             ) : null}
           </div>
 
-          <div className="flex items-center gap-1">
-            {(['png', 'webp', 'jpeg'] as const).map((fmt) => (
+          <div className="flex flex-wrap items-center gap-1">
+            {downloadFormats.map((fmt) => (
               <button
                 key={fmt}
                 type="button"

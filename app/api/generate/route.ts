@@ -1,14 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
-import { getModelSpec } from '@/lib/models';
+import { findModelById, OFFLINE_FALLBACK_MODELS } from '@/lib/models';
 import {
+  discoverNormalizedModels,
   enhancePromptWithAI,
   generateSingleImage,
   OpenRouterApiError,
 } from '@/lib/openrouter';
 import { checkRateLimit, getClientIp } from '@/lib/rate-limit';
 
-export const maxDuration = 60;
+export const dynamic = 'force-dynamic';
+export const maxDuration = 300;
 
 const GenerateSchema = z.object({
   prompt: z
@@ -18,6 +20,9 @@ const GenerateSchema = z.object({
     .max(2000, 'Prompt cannot exceed 2000 characters.'),
   model: z.string().trim().min(3).max(160),
   aspectRatio: z.enum(['1:1', '4:5', '3:4', '16:9', '9:16']).default('1:1'),
+  resolution: z.string().trim().max(40).optional(),
+  quality: z.string().trim().max(40).optional(),
+  background: z.enum(['auto', 'opaque', 'transparent']).optional(),
   variations: z.number().int().min(1).max(4).default(1),
   enhance: z.boolean().default(false),
   promptEditedManually: z.boolean().default(false),
@@ -29,11 +34,12 @@ const GenerateSchema = z.object({
     .string()
     .regex(/^#[0-9a-fA-F]{6}$/)
     .optional(),
+  inputReferences: z.array(z.string().max(12_000_000)).max(10).optional(),
   inputReference: z
     .string()
     .max(12_000_000, 'Reference image payload is too large.')
     .optional(),
-  outputFormat: z.enum(['png', 'webp', 'jpeg']).optional(),
+  outputFormat: z.enum(['png', 'webp', 'jpeg', 'svg']).optional(),
   baseSeed: z.number().int().min(1).max(2_147_483_647).optional(),
 });
 
@@ -66,7 +72,6 @@ export async function POST(req: NextRequest) {
   }
 
   const input = parsed.data;
-  const modelSpec = getModelSpec(input.model);
 
   if (!process.env.OPENROUTER_API_KEY) {
     return NextResponse.json(
@@ -78,7 +83,11 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Only enhance automatically if enabled and user hasn't manually overridden the inspector text
+  const { models } = await discoverNormalizedModels();
+  const modelSpec =
+    findModelById(models, input.model) ??
+    findModelById(OFFLINE_FALLBACK_MODELS, input.model);
+
   let promptUsed = input.prompt;
   let wasEnhanced = false;
   if (input.enhance && !input.promptEditedManually) {
@@ -89,23 +98,33 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Only forward reference image when selected model explicitly supports it
-  const safeReference =
-    modelSpec.supportsReference && input.inputReference ? input.inputReference : undefined;
+  const incomingRefs =
+    input.inputReferences && input.inputReferences.length > 0
+      ? input.inputReferences
+      : input.inputReference
+        ? [input.inputReference]
+        : [];
+
+  const safeReferences =
+    modelSpec?.supportsReference && incomingRefs.length > 0
+      ? incomingRefs.slice(0, Math.max(1, modelSpec.maxReferences))
+      : undefined;
 
   const baseSeed =
     input.baseSeed ?? Math.floor(100_000 + Math.random() * 899_999_000);
 
-  // Fire N parallel single-image requests (n=1 each) with distinct seeds
   const tasks = Array.from({ length: input.variations }, (_, index) => {
     const seed = (baseSeed + index * 7919) % 2_147_483_647;
     return generateSingleImage({
       model: input.model,
       prompt: promptUsed,
       aspectRatio: input.aspectRatio,
+      resolution: input.resolution,
+      quality: input.quality,
+      background: input.background,
       seed,
-      outputFormat: input.outputFormat ?? 'png',
-      inputReference: safeReference,
+      outputFormat: input.outputFormat,
+      inputReferences: safeReferences,
       rgbColors: input.rgbColors,
       backgroundRgbColor: input.backgroundRgbColor,
     });
@@ -176,17 +195,27 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const totalCost = images.reduce(
-    (sum, img) => sum + (typeof img.cost === 'number' ? img.cost : modelSpec.price),
+  const hasReportedCost = images.some((img) => typeof img.cost === 'number');
+  const reportedTotal = images.reduce(
+    (sum, img) => sum + (typeof img.cost === 'number' ? img.cost : 0),
     0
   );
+  const fallbackUnit =
+    modelSpec?.priceUnit === 'image' && typeof modelSpec.priceUsd === 'number'
+      ? modelSpec.priceUsd
+      : 0;
+  const totalCost = hasReportedCost
+    ? reportedTotal
+    : images.length * fallbackUnit;
 
   return NextResponse.json({
     promptUsed,
     enhanced: wasEnhanced,
-    images,
-    errors,
+    modelTier: modelSpec?.tier ?? (input.model.endsWith(':free') ? 'free' : 'paid'),
+    actualCost: hasReportedCost ? reportedTotal : null,
     totalCost,
     totalDurationMs: Date.now() - startedAt,
+    images,
+    errors,
   });
 }
