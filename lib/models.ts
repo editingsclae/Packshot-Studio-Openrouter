@@ -43,6 +43,33 @@ export interface NormalizedImageModel {
 
 export const DEFAULT_FREE_MODEL_ID = 'recraft/recraft-v4.1-flash-v2:free';
 
+export const RECOMMENDED_PRODUCT_MODEL_IDS: readonly string[] = [
+  'recraft/recraft-v4.1-utility',
+  'google/gemini-nano-banana-2.1',
+  'openai/gpt-image-2',
+  'bytedance-seed/seedream-5-0-pro',
+  'black-forest-labs/flux-3-image',
+];
+
+export function isRecommendedProductModel(modelId: string): boolean {
+  return RECOMMENDED_PRODUCT_MODEL_IDS.includes(modelId);
+}
+
+export interface ModelCostSummary {
+  count: number;
+  averageActualCost: number;
+  lastActualCost: number;
+  maxActualCost: number;
+}
+
+export interface BatchEstimateResult {
+  label: string;
+  perImageNote: string | null;
+  exactTotalUsd: number | null;
+  isUsageOrUnknown: boolean;
+  needsFirstRunConfirm: boolean;
+}
+
 const PROVIDER_DISPLAY_MAP: Record<string, string> = {
   openai: 'OpenAI',
   google: 'Google',
@@ -204,14 +231,31 @@ export const OFFLINE_FALLBACK_MODELS: NormalizedImageModel[] = [
   },
 ];
 
-export function formatModelPrice(model: NormalizedImageModel): string {
+export function isUsageOrUnknownPriced(model: NormalizedImageModel): boolean {
+  return model.tier === 'paid' && (model.priceUnit !== 'image' || model.priceUsd === null);
+}
+
+export function formatUsdCompact(amount: number): string {
+  if (!Number.isFinite(amount) || amount <= 0) return '$0.00';
+  if (amount >= 0.01) return `$${amount.toFixed(2)}`;
+  if (amount >= 0.001) return `$${amount.toFixed(3)}`;
+  return `$${amount.toFixed(4)}`;
+}
+
+export function formatModelPrice(
+  model: NormalizedImageModel,
+  costStats?: ModelCostSummary | null
+): string {
   if (model.tier === 'free') {
     return 'Free';
   }
-  if (model.priceUsd === null) {
-    return 'Price unknown';
-  }
-  if (model.priceUnit !== 'image') {
+  if (model.priceUnit !== 'image' || model.priceUsd === null) {
+    if (costStats && costStats.count > 0) {
+      return `~${formatUsdCompact(costStats.averageActualCost)} avg`;
+    }
+    if (model.priceUsd === null) {
+      return 'Price unknown';
+    }
     return 'usage-based';
   }
   const formatted =
@@ -223,22 +267,68 @@ export function formatModelPrice(model: NormalizedImageModel): string {
 
 export function formatBatchEstimate(
   model: NormalizedImageModel,
-  variations: number
-): { label: string; exactTotalUsd: number | null } {
+  variations: number,
+  costStats?: ModelCostSummary | null
+): BatchEstimateResult {
   if (model.tier === 'free') {
-    return { label: 'Free', exactTotalUsd: 0 };
+    return {
+      label: 'Free',
+      perImageNote: null,
+      exactTotalUsd: 0,
+      isUsageOrUnknown: false,
+      needsFirstRunConfirm: false,
+    };
   }
-  if (model.priceUsd === null) {
-    return { label: 'Price unknown', exactTotalUsd: null };
+
+  if (model.priceUnit !== 'image' || model.priceUsd === null) {
+    if (costStats && costStats.count > 0) {
+      const perImage = costStats.averageActualCost;
+      const total = perImage * variations;
+      const runWord = costStats.count === 1 ? 'run' : 'runs';
+      return {
+        label: `~${formatUsdCompact(total)}`,
+        perImageNote: `~${formatUsdCompact(perImage)} / image (avg of ${costStats.count} ${runWord})`,
+        exactTotalUsd: total,
+        isUsageOrUnknown: true,
+        needsFirstRunConfirm: false,
+      };
+    }
+
+    return {
+      label: 'Cost unknown until first run',
+      perImageNote: null,
+      exactTotalUsd: null,
+      isUsageOrUnknown: true,
+      needsFirstRunConfirm: true,
+    };
   }
-  if (model.priceUnit !== 'image') {
-    return { label: 'usage-based', exactTotalUsd: null };
-  }
+
   const total = model.priceUsd * variations;
   return {
     label: `~$${total.toFixed(3)}`,
+    perImageNote: null,
     exactTotalUsd: total,
+    isUsageOrUnknown: false,
+    needsFirstRunConfirm: false,
   };
+}
+
+export function getDefaultQualityForModel(
+  model?: NormalizedImageModel | null
+): string {
+  if (!model || !model.supportedParams.includes('quality')) {
+    return 'auto';
+  }
+  const opts = model.supportedQualities;
+  if (!opts || opts.length === 0) {
+    return 'medium';
+  }
+  const mediumMatch = opts.find((q) => q.toLowerCase() === 'medium');
+  if (mediumMatch) {
+    return mediumMatch;
+  }
+  const nonHigh = opts.find((q) => q.toLowerCase() !== 'high');
+  return nonHigh ?? 'auto';
 }
 
 export function sortModelsByPriceAsc(models: NormalizedImageModel[]): NormalizedImageModel[] {
@@ -276,11 +366,65 @@ export function groupModelsByProvider(
     });
 }
 
+/**
+ * Picks the cheapest paid model with an exact per-image price first,
+ * falling back to any paid model only if no exact per-image model exists.
+ */
 export function getCheapestPaidModel(
-  models: NormalizedImageModel[]
+  models: NormalizedImageModel[],
+  inputMode: 'text' | 'photo' = 'text'
 ): NormalizedImageModel | null {
-  const paid = sortModelsByPriceAsc(models.filter((m) => m.tier === 'paid'));
-  return paid[0] ?? null;
+  const eligiblePaid = models.filter(
+    (m) => m.tier === 'paid' && (inputMode === 'photo' || !m.requiresReference)
+  );
+  const exactPerImage = sortModelsByPriceAsc(
+    eligiblePaid.filter((m) => m.priceUnit === 'image' && m.priceUsd !== null)
+  );
+  if (exactPerImage[0]) return exactPerImage[0];
+
+  const anyPaid = sortModelsByPriceAsc(eligiblePaid);
+  if (anyPaid[0]) return anyPaid[0];
+
+  const allPaid = sortModelsByPriceAsc(models.filter((m) => m.tier === 'paid'));
+  return allPaid[0] ?? null;
+}
+
+/**
+ * Default selection priority:
+ * 1. Free Recraft model (when tier allows free)
+ * 2. recraft/recraft-v4.1-utility
+ * 3. Cheapest paid model with an exact per-image price
+ */
+export function pickPreferredDefaultModel(
+  models: NormalizedImageModel[],
+  options?: { tier?: ModelTier; inputMode?: 'text' | 'photo' }
+): NormalizedImageModel | null {
+  const tier = options?.tier;
+  const inputMode = options?.inputMode ?? 'text';
+  const eligible = models.filter(
+    (m) => inputMode === 'photo' || !m.requiresReference
+  );
+
+  if (tier !== 'paid') {
+    const freeRecraft =
+      eligible.find(
+        (m) => m.tier === 'free' && m.id === DEFAULT_FREE_MODEL_ID
+      ) ??
+      eligible.find((m) => m.tier === 'free' && m.provider === 'recraft');
+    if (freeRecraft) return freeRecraft;
+
+    if (tier === 'free') {
+      const anyFree = eligible.find((m) => m.tier === 'free');
+      if (anyFree) return anyFree;
+    }
+  }
+
+  const utility = eligible.find(
+    (m) => m.id === 'recraft/recraft-v4.1-utility'
+  );
+  if (utility) return utility;
+
+  return getCheapestPaidModel(models, inputMode) ?? eligible[0] ?? models[0] ?? null;
 }
 
 export function findModelById(

@@ -18,6 +18,7 @@ import { toast } from 'sonner';
 import {
   downloadImageAs,
   downloadSelectedAsZip,
+  getRecordSpendUsd,
   isSvgMedia,
   type GeneratedImageItem,
   type GenerationRecord,
@@ -86,6 +87,11 @@ export function LibraryView({
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(() => new Set());
   const [isZipping, setIsZipping] = useState(false);
+
+  const lifetimeSpendUsd = useMemo(
+    () => records.reduce((sum, rec) => sum + getRecordSpendUsd(rec), 0),
+    [records]
+  );
 
   const filteredItems = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -239,9 +245,17 @@ export function LibraryView({
       {/* Header & Filter Bar */}
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between border-b border-[var(--border)] pb-5">
         <div>
-          <h1 className="text-[20px] font-semibold tracking-[-0.02em] text-[var(--foreground)]">
-            Local Library
-          </h1>
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="text-[20px] font-semibold tracking-[-0.02em] text-[var(--foreground)]">
+              Local Library
+            </h1>
+            <span className="rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-2.5 py-0.5 font-mono text-[12px] tabular-nums text-[var(--muted-foreground)]">
+              Lifetime total:{' '}
+              <span className="font-medium text-[var(--foreground)]">
+                ${lifetimeSpendUsd.toFixed(4)}
+              </span>
+            </span>
+          </div>
           <p className="mt-0.5 text-[13px] text-[var(--muted-foreground)]">
             Saved in IndexedDB on this browser. Select shots to archive as ZIP or remix any brief.
           </p>

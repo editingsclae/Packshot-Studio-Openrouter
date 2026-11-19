@@ -300,12 +300,13 @@ export function BriefForm({
         <div className="flex flex-wrap items-center gap-2">
           {brief.colors.map((hex, index) => (
             <div
-              key={`${index}-${hex}`}
+              key={index}
               className="flex h-8 items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] pl-1.5 pr-1"
             >
               <input
                 type="color"
                 aria-label={`Product color ${index + 1}`}
+                title="Click to pick color"
                 value={/^#[0-9a-fA-F]{6}$/.test(hex) ? hex : '#1C1C1E'}
                 onChange={(e) => handleColorChange(index, e.target.value)}
                 className="h-5 w-5 cursor-pointer rounded-[4px] border-0 bg-transparent p-0"

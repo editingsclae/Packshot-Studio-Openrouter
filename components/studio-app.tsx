@@ -17,9 +17,9 @@ import {
   findModelById,
   formatBatchEstimate,
   formatModelPrice,
-  getCheapestPaidModel,
+  getDefaultQualityForModel,
   OFFLINE_FALLBACK_MODELS,
-  sortModelsByPriceAsc,
+  pickPreferredDefaultModel,
   type AspectRatio,
   type DiscoverySource,
   type ModelTier,
@@ -40,14 +40,23 @@ import {
 import { analyzePackshotImage } from '@/lib/packshot-check';
 import {
   DEFAULT_SETTINGS,
+  inferPresetCategory,
   isSvgMedia,
   loadHistory,
+  loadModelCostStats,
   loadSettings,
+  loadUserPresets,
+  recordModelCostSample,
   saveHistory,
+  saveModelCostStats,
   saveSettings,
+  saveUserPresets,
+  seedModelCostStatsFromHistory,
   type GeneratedImageItem,
   type GenerationRecord,
+  type ModelCostStatsMap,
   type StudioSettings,
+  type UserPreset,
 } from '@/lib/db';
 import { TopBar, type StudioTab } from '@/components/top-bar';
 import { CommandPalette } from '@/components/command-palette';
@@ -56,6 +65,10 @@ import {
   ModelSelector,
   type DiscoveryStatus,
 } from '@/components/model-selector';
+import {
+  UserPresetsPanel,
+  type PresetDraftSnapshot,
+} from '@/components/user-presets-panel';
 import { ImageResultCard } from '@/components/image-result-card';
 import { LightboxModal } from '@/components/lightbox-modal';
 import { LibraryView } from '@/components/library-view';
@@ -116,7 +129,10 @@ export function StudioApp() {
   );
   const [clampedRatioNote, setClampedRatioNote] = useState<string | null>(null);
   const [resolution, setResolution] = useState<string>('auto');
-  const [quality, setQuality] = useState<string>('auto');
+  const [qualitySelection, setQualitySelection] = useState<{
+    modelId: string;
+    value: string;
+  } | null>(null);
   const [backgroundMode, setBackgroundMode] = useState<'auto' | 'opaque' | 'transparent'>('auto');
   const [outputFormat, setOutputFormat] = useState<'auto' | 'png' | 'webp' | 'jpeg' | 'svg'>('auto');
   const [customSeed, setCustomSeed] = useState<string>('');
@@ -129,6 +145,13 @@ export function StudioApp() {
   const [manualPromptText, setManualPromptText] = useState('');
   const [isEnhancingPreview, setIsEnhancingPreview] = useState(false);
 
+  // Cost learning stats, active session spend & user-defined presets
+  const [costStats, setCostStats] = useState<ModelCostStatsMap>({});
+  const [sessionSpendUsd, setSessionSpendUsd] = useState<number>(0);
+  const [spendLimitNotice, setSpendLimitNotice] = useState<string | null>(null);
+  const [userPresets, setUserPresets] = useState<UserPreset[]>([]);
+  const [activePresetId, setActivePresetId] = useState<string | null>(null);
+
   // Active generation & elapsed timer state
   const [isGenerating, setIsGenerating] = useState(false);
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -137,13 +160,17 @@ export function StudioApp() {
   const [generationErrors, setGenerationErrors] = useState<string[]>([]);
   const [unavailableModelBanner, setUnavailableModelBanner] = useState<string | null>(null);
 
-  // Cost guard confirmation dialog state (> $0.25)
+  // Cost guard confirmation dialog state (> $0.25 or first usage-based run)
   const [costConfirmState, setCostConfirmState] = useState<{
     open: boolean;
+    title: string;
+    message: string | null;
     estimateLabel: string;
+    perImageNote?: string | null;
     modelName: string;
+    targetModel?: NormalizedImageModel;
     override?: PendingGenerationOverride;
-  }>({ open: false, estimateLabel: '', modelName: '' });
+  }>({ open: false, title: 'Confirm batch cost', message: null, estimateLabel: '', modelName: '' });
 
   // Lightbox state
   const [lightboxState, setLightboxState] = useState<{
@@ -163,7 +190,14 @@ export function StudioApp() {
       enhancerModel?: string;
     }) => {
       if (Array.isArray(data.models) && data.models.length > 0) {
-        setModels(data.models);
+        const discovered = data.models;
+        setModels(discovered);
+        setModelId((currentId) => {
+          if (findModelById(discovered, currentId)) {
+            return currentId;
+          }
+          return pickPreferredDefaultModel(discovered)?.id ?? currentId;
+        });
       }
       setDiscoveryStatus({
         source: data.source ?? 'live',
@@ -212,15 +246,24 @@ export function StudioApp() {
     }
   }, [applyDiscoveryResponse]);
 
-  // Hydrate settings & history from IndexedDB + discover models
+  // Hydrate settings, history & per-model cost stats from IndexedDB + discover models
   useEffect(() => {
     let active = true;
     (async () => {
-      const [loadedSettings, loadedHistory] = await Promise.all([
-        loadSettings(),
-        loadHistory(),
-      ]);
+      const [loadedSettings, loadedHistory, loadedCostStats, loadedUserPresets] =
+        await Promise.all([
+          loadSettings(),
+          loadHistory(),
+          loadModelCostStats(),
+          loadUserPresets(),
+        ]);
       if (!active) return;
+      const seededStats = seedModelCostStatsFromHistory(loadedCostStats, loadedHistory);
+      if (Object.keys(seededStats).length > Object.keys(loadedCostStats).length) {
+        void saveModelCostStats(seededStats);
+      }
+      setCostStats(seededStats);
+      setUserPresets(loadedUserPresets);
       setSettings(loadedSettings);
       setModelId(loadedSettings.defaultModel);
       setAspectRatio(loadedSettings.defaultAspectRatio);
@@ -300,11 +343,17 @@ export function StudioApp() {
   const selectedModel = useMemo(
     () =>
       findModelById(models, modelId) ??
-      models.find((m) => m.tier === settings.modelTier) ??
-      models[0] ??
+      pickPreferredDefaultModel(models, { tier: settings.modelTier, inputMode }) ??
       OFFLINE_FALLBACK_MODELS[0],
-    [models, modelId, settings.modelTier]
+    [models, modelId, settings.modelTier, inputMode]
   );
+
+  const effectiveQuality = useMemo(() => {
+    if (qualitySelection && qualitySelection.modelId === selectedModel.id) {
+      return qualitySelection.value;
+    }
+    return getDefaultQualityForModel(selectedModel);
+  }, [qualitySelection, selectedModel]);
 
   // Clamp aspect ratio if model specifies supportedAspectRatios
   const applyAspectRatioWithClamp = useCallback(
@@ -330,8 +379,9 @@ export function StudioApp() {
       const target = findModelById(models, nextModelId);
       setModelId(nextModelId);
       setUnavailableModelBanner(null);
+      setSpendLimitNotice(null);
       setResolution('auto');
-      setQuality('auto');
+      setQualitySelection(null);
       setBackgroundMode('auto');
       setOutputFormat('auto');
       if (target) {
@@ -351,9 +401,10 @@ export function StudioApp() {
     (mode: 'text' | 'photo') => {
       setInputMode(mode);
       if (mode === 'text' && selectedModel.requiresReference) {
-        const fallback = sortModelsByPriceAsc(
-          models.filter((m) => m.tier === settings.modelTier && !m.requiresReference)
-        )[0];
+        const fallback = pickPreferredDefaultModel(models, {
+          tier: settings.modelTier,
+          inputMode: 'text',
+        });
         if (fallback) {
           handleSelectModel(fallback.id, false);
           toast.info(
@@ -367,22 +418,26 @@ export function StudioApp() {
 
   const handleTierChange = useCallback(
     (nextTier: ModelTier) => {
-      const tierModels = sortModelsByPriceAsc(
-        models.filter(
-          (m) => m.tier === nextTier && (inputMode === 'photo' || !m.requiresReference)
-        )
+      const tierModels = models.filter(
+        (m) => m.tier === nextTier && (inputMode === 'photo' || !m.requiresReference)
       );
-
-      const currentInTier = tierModels.some((m) => m.id === modelId);
-      const defaultInTier = tierModels.some((m) => m.id === settings.defaultModel);
 
       if (tierModels.length === 0) {
         updateSettings({ modelTier: nextTier });
         return;
       }
 
-      const nextActiveModel = currentInTier ? modelId : tierModels[0].id;
-      const nextDefaultModel = defaultInTier ? settings.defaultModel : tierModels[0].id;
+      const preferredForTier =
+        pickPreferredDefaultModel(tierModels, { tier: nextTier, inputMode }) ??
+        tierModels[0];
+
+      const currentInTier = tierModels.some((m) => m.id === modelId);
+      const defaultInTier = tierModels.some((m) => m.id === settings.defaultModel);
+
+      const nextActiveModel = currentInTier ? modelId : preferredForTier.id;
+      const nextDefaultModel = defaultInTier
+        ? settings.defaultModel
+        : preferredForTier.id;
 
       updateSettings({
         modelTier: nextTier,
@@ -390,11 +445,15 @@ export function StudioApp() {
       });
 
       if (!currentInTier) {
-        const chosen = tierModels[0];
-        setModelId(chosen.id);
+        setModelId(preferredForTier.id);
         setUnavailableModelBanner(null);
-        applyAspectRatioWithClamp(aspectRatio, chosen);
-        toast.info(`Switched to ${chosen.name} (${nextTier} tier)`);
+        setSpendLimitNotice(null);
+        setResolution('auto');
+        setQualitySelection(null);
+        setBackgroundMode('auto');
+        setOutputFormat('auto');
+        applyAspectRatioWithClamp(aspectRatio, preferredForTier);
+        toast.info(`Switched to ${preferredForTier.name} (${nextTier} tier)`);
       } else if (nextActiveModel !== modelId) {
         setModelId(nextActiveModel);
       }
@@ -505,7 +564,7 @@ export function StudioApp() {
             model: targetModel.id,
             aspectRatio,
             resolution: resolution !== 'auto' ? resolution : undefined,
-            quality: quality !== 'auto' ? quality : undefined,
+            quality: effectiveQuality !== 'auto' ? effectiveQuality : undefined,
             background: backgroundMode !== 'auto' ? backgroundMode : undefined,
             outputFormat: outputFormat !== 'auto' ? outputFormat : undefined,
             variations,
@@ -609,6 +668,24 @@ export function StudioApp() {
           return next;
         });
 
+        // Record actualCost into session spend & per-model cost stats store
+        if (
+          typeof payload.actualCost === 'number' &&
+          Number.isFinite(payload.actualCost)
+        ) {
+          const runActualCost = payload.actualCost;
+          setSessionSpendUsd((prev) => prev + runActualCost);
+
+          if (processedImages.length > 0) {
+            const perImageCost = runActualCost / processedImages.length;
+            setCostStats((prev) => {
+              const next = recordModelCostSample(prev, targetModel.id, perImageCost);
+              void saveModelCostStats(next);
+              return next;
+            });
+          }
+        }
+
         if (payload.errors && payload.errors.length > 0) {
           setGenerationErrors(payload.errors.map((e) => e.message));
           toast.warning(
@@ -637,7 +714,7 @@ export function StudioApp() {
       variations,
       aspectRatio,
       resolution,
-      quality,
+      effectiveQuality,
       backgroundMode,
       outputFormat,
       brief,
@@ -655,24 +732,29 @@ export function StudioApp() {
         return;
       }
 
+      setSpendLimitNotice(null);
       let activeModel = selectedModel;
 
-      // If Free tier is selected and empty, auto-switch to cheapest paid model
+      // If Free tier is selected and empty, auto-switch using preferred paid default order
       const freeModels = models.filter((m) => m.tier === 'free');
       if (settings.modelTier === 'free' && freeModels.length === 0) {
-        const cheapestPaid = getCheapestPaidModel(models);
-        if (!cheapestPaid) {
+        const preferredPaid = pickPreferredDefaultModel(models, {
+          tier: 'paid',
+          inputMode,
+        });
+        if (!preferredPaid) {
           toast.error('No image models are currently available.');
           return;
         }
-        activeModel = cheapestPaid;
-        setModelId(cheapestPaid.id);
+        activeModel = preferredPaid;
+        setModelId(preferredPaid.id);
+        setQualitySelection(null);
         updateSettings({
           modelTier: 'paid',
-          defaultModel: cheapestPaid.id,
+          defaultModel: preferredPaid.id,
         });
         toast.info(
-          `No free models available — switched to ${cheapestPaid.name} (${formatModelPrice(cheapestPaid)})`
+          `No free models available — switched to ${preferredPaid.name} (${formatModelPrice(preferredPaid, costStats[preferredPaid.id])})`
         );
       }
 
@@ -682,7 +764,54 @@ export function StudioApp() {
         return;
       }
 
-      const estimate = formatBatchEstimate(activeModel, variations);
+      const activeStats = costStats[activeModel.id];
+      const estimate = formatBatchEstimate(activeModel, variations, activeStats);
+
+      // Optional session spend limit check
+      if (
+        settings.sessionSpendLimitUsd !== null &&
+        settings.sessionSpendLimitUsd > 0 &&
+        activeModel.tier === 'paid'
+      ) {
+        const projected =
+          estimate.exactTotalUsd !== null
+            ? sessionSpendUsd + estimate.exactTotalUsd
+            : sessionSpendUsd;
+        const limitExceeded =
+          estimate.exactTotalUsd !== null
+            ? projected > settings.sessionSpendLimitUsd
+            : sessionSpendUsd >= settings.sessionSpendLimitUsd;
+
+        if (limitExceeded) {
+          const msg =
+            estimate.exactTotalUsd !== null
+              ? `Session spend limit reached: $${sessionSpendUsd.toFixed(4)} spent + ${estimate.label} estimate exceeds your $${settings.sessionSpendLimitUsd.toFixed(2)} limit.`
+              : `Session spend limit reached: $${sessionSpendUsd.toFixed(4)} spent reaches your $${settings.sessionSpendLimitUsd.toFixed(2)} limit.`;
+          setSpendLimitNotice(msg);
+          toast.error(msg);
+          return;
+        }
+      }
+
+      // Confirmation for first run (and >2 variations) on usage-based / unknown-price models
+      if (estimate.needsFirstRunConfirm) {
+        setCostConfirmState({
+          open: true,
+          title: 'Confirm usage-based generation',
+          message:
+            variations > 2
+              ? `Usage-based pricing. Cost will be shown after generation. You selected ${variations} variations — consider starting with 1–2 shots first.`
+              : 'Usage-based pricing. Cost will be shown after generation.',
+          estimateLabel: estimate.label,
+          perImageNote: null,
+          modelName: activeModel.name,
+          targetModel: activeModel,
+          override,
+        });
+        return;
+      }
+
+      // Confirmation for batches > $0.25 (exact per-image or learned usage average)
       if (
         activeModel.tier === 'paid' &&
         estimate.exactTotalUsd !== null &&
@@ -690,8 +819,12 @@ export function StudioApp() {
       ) {
         setCostConfirmState({
           open: true,
+          title: 'Confirm batch cost',
+          message: null,
           estimateLabel: estimate.label,
+          perImageNote: estimate.perImageNote,
           modelName: activeModel.name,
+          targetModel: activeModel,
           override,
         });
         return;
@@ -705,8 +838,12 @@ export function StudioApp() {
       selectedModel,
       models,
       settings.modelTier,
+      settings.sessionSpendLimitUsd,
+      inputMode,
       inputReferences.length,
+      costStats,
       variations,
+      sessionSpendUsd,
       updateSettings,
       executeGeneration,
     ]
@@ -802,6 +939,7 @@ export function StudioApp() {
       setBrief(record.brief);
       setShotId(record.shotId);
       setModelId(record.modelId);
+      setQualitySelection(null);
       updateSettings({ modelTier: targetTier });
       setAspectRatio(record.aspectRatio);
       setActiveRefineChips(record.refineChips ?? []);
@@ -871,8 +1009,8 @@ export function StudioApp() {
   );
 
   const batchEstimate = useMemo(
-    () => formatBatchEstimate(selectedModel, variations),
-    [selectedModel, variations]
+    () => formatBatchEstimate(selectedModel, variations, costStats[selectedModel.id]),
+    [selectedModel, variations, costStats]
   );
 
   const showSlowModelHint =
@@ -883,6 +1021,254 @@ export function StudioApp() {
     () =>
       currentRecord ? findModelById(models, currentRecord.modelId) : undefined,
     [currentRecord, models]
+  );
+
+  const presetDraftSnapshot = useMemo<PresetDraftSnapshot>(() => {
+    const productPart = brief.name.trim() || selectedShot.name;
+    return {
+      suggestedName: `${productPart} · ${aspectRatio}`,
+      suggestedCategory: inferPresetCategory(shotId),
+      promptText: activePrompt,
+      promptEditedManually,
+      shotId,
+      refineChips: activeRefineChips,
+      enhanceEnabled,
+      modelId: selectedModel.id,
+      modelName: selectedModel.name,
+      modelTier: selectedModel.tier,
+      aspectRatio,
+      resolution,
+      quality: effectiveQuality,
+      backgroundMode,
+      outputFormat,
+      variations,
+      customSeed,
+    };
+  }, [
+    brief.name,
+    selectedShot.name,
+    activePrompt,
+    promptEditedManually,
+    shotId,
+    activeRefineChips,
+    enhanceEnabled,
+    selectedModel.id,
+    selectedModel.name,
+    selectedModel.tier,
+    aspectRatio,
+    resolution,
+    effectiveQuality,
+    backgroundMode,
+    outputFormat,
+    variations,
+    customSeed,
+  ]);
+
+  const handleSaveUserPreset = useCallback(
+    (name: string, category: string, promptText: string) => {
+      const now = Date.now();
+      const created: UserPreset = {
+        id: `preset-${now}-${Math.random().toString(36).slice(2, 6)}`,
+        name,
+        category: category.trim() || 'Catalog',
+        createdAt: now,
+        updatedAt: now,
+        promptText,
+        promptEditedManually: true,
+        shotId,
+        refineChips: [...activeRefineChips],
+        enhanceEnabled,
+        modelId: selectedModel.id,
+        modelTier: selectedModel.tier,
+        aspectRatio,
+        resolution,
+        quality: effectiveQuality,
+        backgroundMode,
+        outputFormat,
+        variations,
+        customSeed,
+      };
+      setUserPresets((prev) => {
+        const next = [created, ...prev].slice(0, 50);
+        void saveUserPresets(next);
+        return next;
+      });
+      setActivePresetId(created.id);
+      toast.success(`Saved preset "${name}" in ${created.category}`);
+    },
+    [
+      shotId,
+      activeRefineChips,
+      enhanceEnabled,
+      selectedModel.id,
+      selectedModel.tier,
+      aspectRatio,
+      resolution,
+      effectiveQuality,
+      backgroundMode,
+      outputFormat,
+      variations,
+      customSeed,
+    ]
+  );
+
+  const handleEditUserPreset = useCallback(
+    (
+      presetId: string,
+      patch: { name: string; category: string; promptText: string }
+    ) => {
+      const cleanCategory = patch.category.trim() || 'Catalog';
+      setUserPresets((prev) => {
+        const next = prev.map((p) =>
+          p.id !== presetId
+            ? p
+            : {
+                ...p,
+                name: patch.name,
+                category: cleanCategory,
+                promptText: patch.promptText,
+                updatedAt: Date.now(),
+              }
+        );
+        void saveUserPresets(next);
+        return next;
+      });
+      toast.success(`Updated "${patch.name}" (${cleanCategory})`);
+    },
+    []
+  );
+
+  const handleUpdateUserPreset = useCallback(
+    (presetId: string) => {
+      const existing = userPresets.find((p) => p.id === presetId);
+      setUserPresets((prev) => {
+        const next = prev.map((p) => {
+          if (p.id !== presetId) return p;
+          return {
+            ...p,
+            updatedAt: Date.now(),
+            promptText: activePrompt,
+            promptEditedManually: true,
+            shotId,
+            refineChips: [...activeRefineChips],
+            enhanceEnabled,
+            modelId: selectedModel.id,
+            modelTier: selectedModel.tier,
+            aspectRatio,
+            resolution,
+            quality: effectiveQuality,
+            backgroundMode,
+            outputFormat,
+            variations,
+            customSeed,
+          };
+        });
+        void saveUserPresets(next);
+        return next;
+      });
+      setActivePresetId(presetId);
+      if (existing) {
+        toast.success(`Updated preset "${existing.name}"`);
+      }
+    },
+    [
+      userPresets,
+      activePrompt,
+      shotId,
+      activeRefineChips,
+      enhanceEnabled,
+      selectedModel.id,
+      selectedModel.tier,
+      aspectRatio,
+      resolution,
+      effectiveQuality,
+      backgroundMode,
+      outputFormat,
+      variations,
+      customSeed,
+    ]
+  );
+
+  const handleDeleteUserPreset = useCallback(
+    (presetId: string) => {
+      setUserPresets((prev) => {
+        const next = prev.filter((p) => p.id !== presetId);
+        void saveUserPresets(next);
+        return next;
+      });
+      if (activePresetId === presetId) {
+        setActivePresetId(null);
+      }
+      toast.success('Preset removed');
+    },
+    [activePresetId]
+  );
+
+  const handleApplyUserPreset = useCallback(
+    (preset: UserPreset) => {
+      const exactModel = findModelById(models, preset.modelId);
+      const resolvedModel =
+        exactModel ??
+        pickPreferredDefaultModel(models, { tier: preset.modelTier, inputMode }) ??
+        selectedModel;
+
+      setModelId(resolvedModel.id);
+      updateSettings({ modelTier: resolvedModel.tier });
+      setShotId(preset.shotId);
+      setActiveRefineChips(preset.refineChips ?? []);
+      setEnhanceEnabled(Boolean(preset.enhanceEnabled));
+      setManualPromptText(preset.promptText);
+      setPromptEditedManually(true);
+      applyAspectRatioWithClamp(preset.aspectRatio, resolvedModel);
+
+      setResolution(
+        preset.resolution !== 'auto' &&
+          resolvedModel.supportedParams.includes('resolution')
+          ? preset.resolution
+          : 'auto'
+      );
+
+      if (
+        resolvedModel.supportedParams.includes('quality') &&
+        preset.quality &&
+        preset.quality !== 'auto'
+      ) {
+        setQualitySelection({ modelId: resolvedModel.id, value: preset.quality });
+      } else {
+        setQualitySelection(null);
+      }
+
+      setBackgroundMode(
+        preset.backgroundMode !== 'auto' &&
+          resolvedModel.supportedParams.includes('background')
+          ? preset.backgroundMode
+          : 'auto'
+      );
+      setOutputFormat(
+        preset.outputFormat !== 'auto' &&
+          resolvedModel.supportedParams.includes('output_format')
+          ? preset.outputFormat
+          : 'auto'
+      );
+      setVariations(Math.min(4, Math.max(1, preset.variations || 1)));
+      setCustomSeed(preset.customSeed ?? '');
+      setUnavailableModelBanner(null);
+      setSpendLimitNotice(null);
+      setActivePresetId(preset.id);
+
+      if (resolvedModel.requiresReference && inputMode === 'text') {
+        setInputMode('photo');
+      }
+
+      if (!exactModel) {
+        toast.warning(
+          `Saved model unavailable — applied "${preset.name}" with ${resolvedModel.name}`
+        );
+      } else {
+        toast.success(`Applied preset "${preset.name}"`);
+      }
+    },
+    [models, inputMode, selectedModel, updateSettings, applyAspectRatioWithClamp]
   );
 
   return (
@@ -903,6 +1289,21 @@ export function StudioApp() {
           <div className="mx-auto grid max-w-[1600px] grid-cols-1 lg:grid-cols-[410px_minmax(0,1fr)] min-h-[calc(100vh-56px)]">
             {/* Left Control Panel */}
             <aside className="studio-scrollbar border-b lg:border-b-0 lg:border-r border-[var(--border)] bg-[var(--background)] p-4 sm:p-5 pb-24 lg:pb-8 space-y-6 lg:max-h-[calc(100vh-56px)] lg:overflow-y-auto">
+              {/* User-Defined Presets */}
+              <UserPresetsPanel
+                presets={userPresets}
+                activePresetId={activePresetId}
+                models={models}
+                currentSnapshot={presetDraftSnapshot}
+                onSavePreset={handleSaveUserPreset}
+                onEditPreset={handleEditUserPreset}
+                onApplyPreset={handleApplyUserPreset}
+                onUpdatePreset={handleUpdateUserPreset}
+                onDeletePreset={handleDeleteUserPreset}
+              />
+
+              <hr className="border-[var(--border)]" />
+
               {/* Section 1: Product Brief */}
               <section className="space-y-3">
                 <div className="flex items-center justify-between gap-2">
@@ -997,12 +1398,13 @@ export function StudioApp() {
                   models={models}
                   tier={settings.modelTier}
                   onTierChange={handleTierChange}
-                  selectedModelId={modelId}
+                  selectedModelId={selectedModel.id}
                   onSelectModel={(id) => handleSelectModel(id, false)}
                   inputMode={inputMode}
                   discoveryStatus={discoveryStatus}
                   isLoadingModels={isLoadingModels}
                   onRetryDiscovery={handleRefreshModels}
+                  costStats={costStats}
                   compact
                 />
 
@@ -1077,7 +1479,15 @@ export function StudioApp() {
                     {hasExplicitParam('quality') ? (
                       <div className="space-y-1">
                         <Label htmlFor="quality-select">Quality</Label>
-                        <Select value={quality} onValueChange={setQuality}>
+                        <Select
+                          value={effectiveQuality}
+                          onValueChange={(val) =>
+                            setQualitySelection({
+                              modelId: selectedModel.id,
+                              value: val,
+                            })
+                          }
+                        >
                           <SelectTrigger id="quality-select" className="h-8 text-[12px]">
                             <SelectValue />
                           </SelectTrigger>
@@ -1092,6 +1502,9 @@ export function StudioApp() {
                             )}
                           </SelectContent>
                         </Select>
+                        <p className="text-[10px] leading-snug text-[var(--muted-foreground)]">
+                          Defaulted to medium — &ldquo;high&rdquo; can cost several times more.
+                        </p>
                       </div>
                     ) : null}
 
@@ -1265,13 +1678,13 @@ export function StudioApp() {
 
               {/* Desktop Generate CTA + Cost Estimate & Slow Hint */}
               <div className="hidden lg:block space-y-2 pt-1">
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <Button
                     type="button"
                     size="lg"
                     disabled={isGenerating}
                     onClick={() => void runGeneration()}
-                    className="flex-1 justify-between"
+                    className="flex-1 min-w-[175px] justify-between"
                   >
                     <span>
                       {isGenerating
@@ -1287,6 +1700,28 @@ export function StudioApp() {
                     </span>
                   ) : null}
                 </div>
+
+                {selectedModel.tier === 'paid' && batchEstimate.perImageNote ? (
+                  <p className="font-mono text-[11px] tabular-nums text-[var(--muted-foreground)]">
+                    {batchEstimate.perImageNote}
+                  </p>
+                ) : null}
+
+                {spendLimitNotice ? (
+                  <div
+                    role="alert"
+                    className="rounded-[8px] border border-red-500/40 bg-[var(--surface)] px-3 py-2 text-[11px] text-red-400 space-y-1.5"
+                  >
+                    <p>{spendLimitNotice}</p>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('settings')}
+                      className="font-medium text-[var(--foreground)] underline cursor-pointer"
+                    >
+                      Adjust limit in Settings
+                    </button>
+                  </div>
+                ) : null}
 
                 {showSlowModelHint ? (
                   <p className="flex items-center gap-1.5 text-[11px] text-[var(--muted-foreground)]">
@@ -1314,9 +1749,10 @@ export function StudioApp() {
                       size="sm"
                       variant="secondary"
                       onClick={() => {
-                        const fallback =
-                          getCheapestPaidModel(models) ??
-                          models.find((m) => m.id !== modelId);
+                        const fallback = pickPreferredDefaultModel(
+                          models.filter((m) => m.id !== modelId),
+                          { tier: settings.modelTier, inputMode }
+                        );
                         if (fallback) {
                           updateSettings({ modelTier: fallback.tier });
                           handleSelectModel(fallback.id, true);
@@ -1338,8 +1774,8 @@ export function StudioApp() {
               ) : null}
 
               {/* Canvas Header Bar */}
-              <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
-                <div className="flex items-center gap-2.5">
+              <div className="mb-5 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border)] pb-3">
+                <div className="flex flex-wrap items-center gap-2.5">
                   {isGenerating ? (
                     <span className="inline-flex items-center gap-2 rounded-[6px] border border-[var(--border)] bg-[var(--card)] px-2.5 py-1 text-[12px] text-[var(--foreground)]">
                       <span className="h-2 w-2 rounded-full bg-[#0070f3]" />
@@ -1352,7 +1788,11 @@ export function StudioApp() {
                       <span className="h-2 w-2 rounded-full bg-emerald-500" />
                       <span>Complete</span>
                     </span>
-                  ) : null}
+                  ) : (
+                    <span className="font-mono text-[11px] uppercase tracking-wider text-[var(--muted-foreground)]">
+                      Studio Canvas
+                    </span>
+                  )}
 
                   {currentRecord && !isGenerating ? (
                     <span className="font-mono text-[12px] tabular-nums text-[var(--muted-foreground)]">
@@ -1368,16 +1808,28 @@ export function StudioApp() {
                   ) : null}
                 </div>
 
-                {showSlowModelHint && isGenerating ? (
-                  <span className="flex items-center gap-1.5 font-mono text-[11px] text-[var(--muted-foreground)]">
-                    <Clock className="h-3 w-3 shrink-0" />
-                    <span>This model can take over a minute</span>
+                <div className="flex flex-wrap items-center gap-3">
+                  {showSlowModelHint && isGenerating ? (
+                    <span className="flex items-center gap-1.5 font-mono text-[11px] text-[var(--muted-foreground)]">
+                      <Clock className="h-3 w-3 shrink-0" />
+                      <span>This model can take over a minute</span>
+                    </span>
+                  ) : currentRecord && currentRecord.enhanced ? (
+                    <span className="font-mono text-[11px] text-[var(--muted-foreground)]">
+                      AI-enhanced prompt applied
+                    </span>
+                  ) : null}
+
+                  <span className="rounded-[6px] border border-[var(--border)] bg-[var(--card)] px-2.5 py-1 font-mono text-[12px] tabular-nums text-[var(--muted-foreground)]">
+                    Spent this session:{' '}
+                    <span className="font-medium text-[var(--foreground)]">
+                      ${sessionSpendUsd.toFixed(4)}
+                    </span>
+                    {settings.sessionSpendLimitUsd !== null ? (
+                      <span> / ${settings.sessionSpendLimitUsd.toFixed(2)} limit</span>
+                    ) : null}
                   </span>
-                ) : currentRecord && currentRecord.enhanced ? (
-                  <span className="font-mono text-[11px] text-[var(--muted-foreground)]">
-                    AI-enhanced prompt applied
-                  </span>
-                ) : null}
+                </div>
               </div>
 
               {/* Partial Failure Notice */}
@@ -1497,7 +1949,7 @@ export function StudioApp() {
             </section>
 
             {/* Mobile Sticky Generate Bar */}
-            <div className="fixed inset-x-0 bottom-0 z-30 border-t border-[var(--border)] bg-[var(--background)]/95 p-3 backdrop-blur-sm lg:hidden">
+            <div className="fixed inset-x-0 bottom-0 z-30 border-t border-[var(--border)] bg-[var(--background)]/95 p-3 backdrop-blur-sm lg:hidden space-y-1.5">
               <div className="flex items-center gap-2">
                 <Button
                   type="button"
@@ -1516,6 +1968,11 @@ export function StudioApp() {
                   </span>
                 ) : null}
               </div>
+              {selectedModel.tier === 'paid' && batchEstimate.perImageNote ? (
+                <p className="font-mono text-[10px] tabular-nums text-[var(--muted-foreground)]">
+                  {batchEstimate.perImageNote}
+                </p>
+              ) : null}
             </div>
           </div>
         ) : activeTab === 'library' ? (
@@ -1536,6 +1993,8 @@ export function StudioApp() {
             settings={settings}
             onUpdateSettings={updateSettings}
             models={models}
+            costStats={costStats}
+            sessionSpendUsd={sessionSpendUsd}
             onTierChange={handleTierChange}
             onSelectDefaultModel={(id) => handleSelectModel(id, true)}
             inputMode={inputMode}
@@ -1548,32 +2007,47 @@ export function StudioApp() {
         )}
       </main>
 
-      {/* Cost Guard Confirmation Dialog (> $0.25) */}
+      {/* Cost Guard Confirmation Dialog (> $0.25 or first usage-based run) */}
       <StudioModal
         open={costConfirmState.open}
         onOpenChange={(open) =>
           setCostConfirmState((prev) => ({ ...prev, open }))
         }
-        title="Confirm paid generation cost"
+        title={costConfirmState.title}
         className="max-w-md p-5"
       >
         <div className="space-y-4">
           <div className="space-y-1.5 pr-6">
             <h2 className="text-[16px] font-semibold tracking-[-0.02em] text-[var(--foreground)]">
-              Confirm batch cost
+              {costConfirmState.title}
             </h2>
-            <p className="text-[13px] leading-relaxed text-[var(--muted-foreground)]">
-              Generating <span className="font-mono text-[var(--foreground)]">{variations}</span>{' '}
-              {variations === 1 ? 'variation' : 'variations'} with{' '}
-              <span className="font-medium text-[var(--foreground)]">
-                {costConfirmState.modelName}
-              </span>{' '}
-              is estimated at{' '}
-              <span className="font-mono font-medium text-[var(--foreground)]">
-                {costConfirmState.estimateLabel}
-              </span>
-              .
-            </p>
+            {costConfirmState.message ? (
+              <p className="text-[13px] leading-relaxed text-[var(--muted-foreground)]">
+                <span className="font-medium text-[var(--foreground)]">
+                  {costConfirmState.modelName}
+                </span>
+                : {costConfirmState.message}
+              </p>
+            ) : (
+              <p className="text-[13px] leading-relaxed text-[var(--muted-foreground)]">
+                Generating{' '}
+                <span className="font-mono text-[var(--foreground)]">{variations}</span>{' '}
+                {variations === 1 ? 'variation' : 'variations'} with{' '}
+                <span className="font-medium text-[var(--foreground)]">
+                  {costConfirmState.modelName}
+                </span>{' '}
+                is estimated at{' '}
+                <span className="font-mono font-medium text-[var(--foreground)]">
+                  {costConfirmState.estimateLabel}
+                </span>
+                .
+                {costConfirmState.perImageNote ? (
+                  <span className="mt-1 block font-mono text-[11px] text-[var(--muted-foreground)]">
+                    {costConfirmState.perImageNote}
+                  </span>
+                ) : null}
+              </p>
+            )}
           </div>
 
           <div className="flex items-center justify-end gap-2 border-t border-[var(--border)] pt-3">
@@ -1589,8 +2063,9 @@ export function StudioApp() {
               variant="default"
               onClick={() => {
                 const override = costConfirmState.override;
+                const target = costConfirmState.targetModel ?? selectedModel;
                 setCostConfirmState((prev) => ({ ...prev, open: false }));
-                void executeGeneration(selectedModel, override);
+                void executeGeneration(target, override);
               }}
             >
               Confirm &amp; Generate

@@ -8,7 +8,8 @@ import {
   type ModelTier,
   type NormalizedImageModel,
 } from '@/lib/models';
-import type { StudioSettings } from '@/lib/db';
+import type { ModelCostStatsMap, StudioSettings } from '@/lib/db';
+import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
@@ -22,6 +23,8 @@ interface SettingsViewProps {
   settings: StudioSettings;
   onUpdateSettings: (patch: Partial<StudioSettings>) => void;
   models: NormalizedImageModel[];
+  costStats: ModelCostStatsMap;
+  sessionSpendUsd: number;
   onTierChange: (tier: ModelTier) => void;
   onSelectDefaultModel: (modelId: string) => void;
   inputMode: 'text' | 'photo';
@@ -39,6 +42,8 @@ export function SettingsView({
   settings,
   onUpdateSettings,
   models,
+  costStats,
+  sessionSpendUsd,
   onTierChange,
   onSelectDefaultModel,
   inputMode,
@@ -48,6 +53,8 @@ export function SettingsView({
   onRefreshModels,
   serverStatus,
 }: SettingsViewProps) {
+  const limitEnabled = settings.sessionSpendLimitUsd !== null;
+
   return (
     <div className="mx-auto max-w-2xl px-4 sm:px-6 py-8 space-y-8">
       <div className="border-b border-[var(--border)] pb-5">
@@ -94,6 +101,7 @@ export function SettingsView({
             discoveryStatus={discoveryStatus}
             isLoadingModels={isLoadingModels}
             onRetryDiscovery={onRefreshModels}
+            costStats={costStats}
           />
         </div>
 
@@ -122,6 +130,80 @@ export function SettingsView({
               );
             })}
           </div>
+        </div>
+
+        {/* Optional Spend Limit Per Session */}
+        <div className="border-t border-[var(--border)] pt-4 space-y-3">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <Label htmlFor="spend-limit-switch" className="text-[13px] text-[var(--foreground)]">
+                Spend limit per session
+              </Label>
+              <p className="mt-0.5 text-[12px] text-[var(--muted-foreground)]">
+                Optional cap for this browser session. Blocks paid generations once session spend plus estimate exceeds the limit.
+              </p>
+            </div>
+            <Switch
+              id="spend-limit-switch"
+              checked={limitEnabled}
+              onCheckedChange={(checked) =>
+                onUpdateSettings({
+                  sessionSpendLimitUsd: checked ? 1.0 : null,
+                })
+              }
+            />
+          </div>
+
+          {limitEnabled ? (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-[8px] border border-[var(--border)] bg-[var(--surface)] p-3">
+              <div className="flex items-center gap-2">
+                <Label htmlFor="spend-limit-input" className="text-[12px] text-[var(--muted-foreground)]">
+                  Max USD
+                </Label>
+                <div className="relative w-28">
+                  <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 font-mono text-[12px] text-[var(--muted-foreground)]">
+                    $
+                  </span>
+                  <Input
+                    id="spend-limit-input"
+                    type="number"
+                    min="0.01"
+                    step="0.25"
+                    value={settings.sessionSpendLimitUsd ?? 1}
+                    onChange={(e) => {
+                      const raw = parseFloat(e.target.value);
+                      if (Number.isFinite(raw) && raw > 0) {
+                        onUpdateSettings({ sessionSpendLimitUsd: raw });
+                      }
+                    }}
+                    className="h-8 pl-6 font-mono text-[12px] tabular-nums"
+                  />
+                </div>
+
+                <div className="hidden sm:flex items-center gap-1">
+                  {[0.5, 1, 2.5, 5].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => onUpdateSettings({ sessionSpendLimitUsd: preset })}
+                      className={cn(
+                        'h-7 rounded-[5px] border px-2 font-mono text-[11px] tabular-nums transition-colors cursor-pointer',
+                        settings.sessionSpendLimitUsd === preset
+                          ? 'border-[var(--foreground)] bg-[var(--foreground)] text-[var(--background)]'
+                          : 'border-[var(--border)] bg-[var(--card)] text-[var(--muted-foreground)] hover:text-[var(--foreground)]'
+                      )}
+                    >
+                      ${preset.toFixed(preset % 1 === 0 ? 0 : 2)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <span className="font-mono text-[11px] tabular-nums text-[var(--muted-foreground)]">
+                Spent this session: ${sessionSpendUsd.toFixed(4)}
+              </span>
+            </div>
+          ) : null}
         </div>
       </section>
 

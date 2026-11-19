@@ -43,6 +43,7 @@ export interface StudioSettings {
   defaultAspectRatio: AspectRatio;
   showPromptInspector: boolean;
   theme: 'dark' | 'light';
+  sessionSpendLimitUsd: number | null;
 }
 
 export const DEFAULT_SETTINGS: StudioSettings = {
@@ -51,10 +52,72 @@ export const DEFAULT_SETTINGS: StudioSettings = {
   defaultAspectRatio: '1:1',
   showPromptInspector: true,
   theme: 'dark',
+  sessionSpendLimitUsd: null,
 };
+
+export interface ModelCostStats {
+  modelId: string;
+  count: number;
+  averageActualCost: number;
+  lastActualCost: number;
+  maxActualCost: number;
+  updatedAt: number;
+}
+
+export type ModelCostStatsMap = Record<string, ModelCostStats>;
+
+export const USER_PRESET_CATEGORIES = [
+  'Hero',
+  'Macro',
+  'Catalog',
+  'Lifestyle',
+  'Packaging',
+] as const;
+
+export function inferPresetCategory(shotId: ShotPresetId): string {
+  switch (shotId) {
+    case 'studio-hero':
+      return 'Hero';
+    case 'macro-detail':
+      return 'Macro';
+    case 'marketplace-packshot':
+      return 'Catalog';
+    case 'lifestyle-scene':
+    case 'flat-lay':
+      return 'Lifestyle';
+    case 'packaging-mockup':
+      return 'Packaging';
+    default:
+      return 'Catalog';
+  }
+}
+
+export interface UserPreset {
+  id: string;
+  name: string;
+  category: string;
+  createdAt: number;
+  updatedAt: number;
+  promptText: string;
+  promptEditedManually: boolean;
+  shotId: ShotPresetId;
+  refineChips: string[];
+  enhanceEnabled: boolean;
+  modelId: string;
+  modelTier: ModelTier;
+  aspectRatio: AspectRatio;
+  resolution: string;
+  quality: string;
+  backgroundMode: 'auto' | 'opaque' | 'transparent';
+  outputFormat: 'auto' | 'png' | 'webp' | 'jpeg' | 'svg';
+  variations: number;
+  customSeed: string;
+}
 
 const HISTORY_KEY = 'packshot-studio:history:v1';
 const SETTINGS_KEY = 'packshot-studio:settings:v1';
+const MODEL_COST_STATS_KEY = 'packshot-studio:model-cost-stats:v1';
+const USER_PRESETS_KEY = 'packshot-studio:user-presets:v1';
 
 export async function loadHistory(): Promise<GenerationRecord[]> {
   try {
@@ -70,6 +133,30 @@ export async function saveHistory(records: GenerationRecord[]): Promise<void> {
     await set(HISTORY_KEY, records.slice(0, 100));
   } catch {
     // Ignore storage quota issues gracefully
+  }
+}
+
+export async function loadUserPresets(): Promise<UserPreset[]> {
+  try {
+    const presets = await get<UserPreset[]>(USER_PRESETS_KEY);
+    if (!Array.isArray(presets)) return [];
+    return presets.map((p) => ({
+      ...p,
+      category:
+        typeof p.category === 'string' && p.category.trim().length > 0
+          ? p.category.trim()
+          : inferPresetCategory(p.shotId),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+export async function saveUserPresets(presets: UserPreset[]): Promise<void> {
+  try {
+    await set(USER_PRESETS_KEY, presets.slice(0, 50));
+  } catch {
+    // Ignore storage issues gracefully
   }
 }
 
@@ -89,6 +176,90 @@ export async function saveSettings(settings: StudioSettings): Promise<void> {
   } catch {
     // Ignore storage issues gracefully
   }
+}
+
+export async function loadModelCostStats(): Promise<ModelCostStatsMap> {
+  try {
+    const stored = await get<ModelCostStatsMap>(MODEL_COST_STATS_KEY);
+    return stored && typeof stored === 'object' && !Array.isArray(stored)
+      ? stored
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+export async function saveModelCostStats(stats: ModelCostStatsMap): Promise<void> {
+  try {
+    await set(MODEL_COST_STATS_KEY, stats);
+  } catch {
+    // Ignore storage issues gracefully
+  }
+}
+
+export function recordModelCostSample(
+  prev: ModelCostStatsMap,
+  modelId: string,
+  perImageActualCost: number
+): ModelCostStatsMap {
+  if (!Number.isFinite(perImageActualCost) || perImageActualCost < 0) {
+    return prev;
+  }
+  const existing = prev[modelId];
+  const nextCount = (existing?.count ?? 0) + 1;
+  const prevTotal = existing ? existing.averageActualCost * existing.count : 0;
+  const nextAverage = (prevTotal + perImageActualCost) / nextCount;
+  const nextMax = existing
+    ? Math.max(existing.maxActualCost, perImageActualCost)
+    : perImageActualCost;
+
+  return {
+    ...prev,
+    [modelId]: {
+      modelId,
+      count: nextCount,
+      averageActualCost: nextAverage,
+      lastActualCost: perImageActualCost,
+      maxActualCost: nextMax,
+      updatedAt: Date.now(),
+    },
+  };
+}
+
+export function seedModelCostStatsFromHistory(
+  existing: ModelCostStatsMap,
+  history: GenerationRecord[]
+): ModelCostStatsMap {
+  if (history.length === 0) return existing;
+  let merged = { ...existing };
+  // Process oldest-to-newest so lastActualCost reflects the most recent run
+  const chronological = [...history].sort((a, b) => a.createdAt - b.createdAt);
+  const modelsPresentInStore = new Set(Object.keys(existing));
+
+  for (const rec of chronological) {
+    if (modelsPresentInStore.has(rec.modelId)) continue;
+    if (typeof rec.actualCost !== 'number' || !Number.isFinite(rec.actualCost)) {
+      continue;
+    }
+    const imageCount = Math.max(1, rec.images.length);
+    const perImage = rec.actualCost / imageCount;
+    merged = recordModelCostSample(merged, rec.modelId, perImage);
+  }
+  return merged;
+}
+
+export function getRecordSpendUsd(record: GenerationRecord): number {
+  if (typeof record.actualCost === 'number' && Number.isFinite(record.actualCost)) {
+    return record.actualCost;
+  }
+  const perImageSum = record.images.reduce(
+    (sum, img) => sum + (typeof img.cost === 'number' && Number.isFinite(img.cost) ? img.cost : 0),
+    0
+  );
+  if (perImageSum > 0) return perImageSum;
+  return typeof record.totalCost === 'number' && Number.isFinite(record.totalCost)
+    ? record.totalCost
+    : 0;
 }
 
 export function isSvgMedia(mediaType?: string, dataUrl?: string): boolean {

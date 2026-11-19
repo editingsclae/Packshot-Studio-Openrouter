@@ -8,15 +8,19 @@ import {
   HelpCircle,
   RefreshCw,
   Search,
+  Sparkles,
   WifiOff,
 } from 'lucide-react';
 import {
   formatModelPrice,
   groupModelsByProvider,
+  isRecommendedProductModel,
+  pickPreferredDefaultModel,
   type DiscoverySource,
   type ModelTier,
   type NormalizedImageModel,
 } from '@/lib/models';
+import type { ModelCostStatsMap } from '@/lib/db';
 import { Input } from '@/components/ui/input';
 import {
   Tooltip,
@@ -43,6 +47,7 @@ interface ModelSelectorProps {
   discoveryStatus: DiscoveryStatus;
   isLoadingModels: boolean;
   onRetryDiscovery: () => void;
+  costStats?: ModelCostStatsMap;
   label?: string;
   compact?: boolean;
 }
@@ -64,11 +69,13 @@ export function ModelSelector({
   discoveryStatus,
   isLoadingModels,
   onRetryDiscovery,
+  costStats,
   label,
   compact = false,
 }: ModelSelectorProps) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
+  const [recommendedOnly, setRecommendedOnly] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -86,23 +93,34 @@ export function ModelSelector({
     [models, tier]
   );
 
+  const recommendedInTierCount = useMemo(
+    () => tierModels.filter((m) => isRecommendedProductModel(m.id)).length,
+    [tierModels]
+  );
+
   const filteredGroups = useMemo(() => {
     const q = search.trim().toLowerCase();
+    const baseList = recommendedOnly
+      ? tierModels.filter((m) => isRecommendedProductModel(m.id))
+      : tierModels;
     const list = q
-      ? tierModels.filter(
+      ? baseList.filter(
           (m) =>
             m.name.toLowerCase().includes(q) ||
             m.id.toLowerCase().includes(q) ||
             m.providerLabel.toLowerCase().includes(q) ||
             m.provider.toLowerCase().includes(q)
         )
-      : tierModels;
+      : baseList;
     return groupModelsByProvider(list);
-  }, [tierModels, search]);
+  }, [tierModels, recommendedOnly, search]);
 
   const selectedModel = useMemo(
-    () => models.find((m) => m.id === selectedModelId) ?? tierModels[0],
-    [models, selectedModelId, tierModels]
+    () =>
+      models.find((m) => m.id === selectedModelId) ??
+      pickPreferredDefaultModel(tierModels, { tier, inputMode }) ??
+      tierModels[0],
+    [models, selectedModelId, tierModels, tier, inputMode]
   );
 
   useEffect(() => {
@@ -254,7 +272,7 @@ export function ModelSelector({
               </span>
               {selectedModel ? (
                 <span className="font-mono text-[11px] text-[var(--muted-foreground)] shrink-0 tabular-nums">
-                  {formatModelPrice(selectedModel)}
+                  {formatModelPrice(selectedModel, costStats?.[selectedModel.id])}
                 </span>
               ) : null}
             </div>
@@ -268,7 +286,7 @@ export function ModelSelector({
 
           {open ? (
             <div className="absolute left-0 right-0 z-50 mt-1.5 overflow-hidden rounded-[8px] border border-[var(--border)] bg-[var(--card)]">
-              <div className="border-b border-[var(--border)] p-2">
+              <div className="border-b border-[var(--border)] p-2 space-y-2">
                 <div className="relative">
                   <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--muted-foreground)]" />
                   <Input
@@ -279,6 +297,36 @@ export function ModelSelector({
                     className="h-8 pl-8 text-[12px]"
                   />
                 </div>
+
+                <div className="flex items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    aria-pressed={recommendedOnly}
+                    onClick={() => setRecommendedOnly((prev) => !prev)}
+                    className={cn(
+                      'inline-flex h-6 items-center gap-1.5 rounded-[5px] border px-2 text-[11px] font-medium transition-colors cursor-pointer',
+                      recommendedOnly
+                        ? 'border-[var(--foreground)] bg-[var(--foreground)] text-[var(--background)]'
+                        : 'border-[var(--border)] bg-[var(--surface)] text-[var(--muted-foreground)] hover:border-[var(--border-hover)] hover:text-[var(--foreground)]'
+                    )}
+                  >
+                    <Sparkles className="h-3 w-3" />
+                    <span>Recommended</span>
+                    <span className="font-mono text-[10px] opacity-75 tabular-nums">
+                      {recommendedInTierCount}
+                    </span>
+                  </button>
+
+                  {recommendedOnly ? (
+                    <button
+                      type="button"
+                      onClick={() => setRecommendedOnly(false)}
+                      className="text-[11px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] cursor-pointer"
+                    >
+                      Show all
+                    </button>
+                  ) : null}
+                </div>
               </div>
 
               <div
@@ -286,9 +334,22 @@ export function ModelSelector({
                 className="studio-scrollbar max-h-72 overflow-y-auto p-1.5 space-y-2"
               >
                 {filteredGroups.length === 0 ? (
-                  <p className="py-6 text-center text-[12px] text-[var(--muted-foreground)]">
-                    No matching {tier} models found.
-                  </p>
+                  <div className="py-6 px-3 text-center space-y-2">
+                    <p className="text-[12px] text-[var(--muted-foreground)]">
+                      {recommendedOnly && recommendedInTierCount === 0
+                        ? `No recommended product models in the ${tier} tier.`
+                        : `No matching ${tier} models found.`}
+                    </p>
+                    {recommendedOnly && recommendedInTierCount === 0 && tier === 'free' ? (
+                      <button
+                        type="button"
+                        onClick={() => onTierChange('paid')}
+                        className="inline-flex h-7 items-center rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-2.5 text-[11px] font-medium text-[var(--foreground)] hover:border-[var(--border-hover)] cursor-pointer"
+                      >
+                        Switch to Paid tier
+                      </button>
+                    ) : null}
+                  </div>
                 ) : (
                   <TooltipProvider delayDuration={150}>
                     {filteredGroups.map((group) => (
@@ -300,6 +361,8 @@ export function ModelSelector({
                           const isSelected = m.id === selectedModelId;
                           const isDisabled =
                             m.requiresReference && inputMode === 'text';
+                          const isRecommended = isRecommendedProductModel(m.id);
+                          const mStats = costStats?.[m.id];
 
                           return (
                             <button
@@ -331,11 +394,17 @@ export function ModelSelector({
                                   <div className="truncate text-[12px] font-medium">
                                     {m.name}
                                   </div>
-                                  {(m.requiresReference ||
+                                  {(isRecommended ||
+                                    m.requiresReference ||
                                     m.supportsReference ||
                                     m.supportsSvg ||
                                     m.badge) ? (
                                     <div className="flex flex-wrap items-center gap-1">
+                                      {isRecommended ? (
+                                        <span className="rounded-[4px] border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-500">
+                                          Recommended for products
+                                        </span>
+                                      ) : null}
                                       {m.requiresReference ? (
                                         <span className="rounded-[4px] border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-500">
                                           Needs reference image
@@ -365,9 +434,11 @@ export function ModelSelector({
 
                               <div className="flex items-center gap-1 shrink-0 pt-0.5">
                                 <span className="font-mono text-[11px] text-[var(--muted-foreground)] tabular-nums">
-                                  {formatModelPrice(m)}
+                                  {formatModelPrice(m, mStats)}
                                 </span>
-                                {m.priceUsd === null && m.priceUnverified ? (
+                                {m.priceUsd === null &&
+                                m.priceUnverified &&
+                                !(mStats && mStats.count > 0) ? (
                                   <Tooltip>
                                     <TooltipTrigger asChild>
                                       <span className="inline-flex text-[var(--muted-foreground)]">
@@ -399,9 +470,12 @@ export function ModelSelector({
           <div className="flex flex-wrap items-center justify-between gap-2">
             <span className="flex items-center gap-1.5 font-mono text-[11px] text-[var(--foreground)] tabular-nums">
               <span>
-                {selectedModel.providerLabel} · {formatModelPrice(selectedModel)}
+                {selectedModel.providerLabel} ·{' '}
+                {formatModelPrice(selectedModel, costStats?.[selectedModel.id])}
               </span>
-              {selectedModel.priceUsd === null && selectedModel.priceUnverified ? (
+              {selectedModel.priceUsd === null &&
+              selectedModel.priceUnverified &&
+              !(costStats?.[selectedModel.id]?.count) ? (
                 <TooltipProvider delayDuration={150}>
                   <Tooltip>
                     <TooltipTrigger asChild>
@@ -418,6 +492,11 @@ export function ModelSelector({
             </span>
 
             <div className="flex flex-wrap items-center gap-1">
+              {isRecommendedProductModel(selectedModel.id) ? (
+                <span className="rounded-[4px] border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-500">
+                  Recommended for products
+                </span>
+              ) : null}
               {selectedModel.requiresReference ? (
                 <span className="rounded-[4px] border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-500">
                   Needs reference image
