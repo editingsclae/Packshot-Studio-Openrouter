@@ -228,6 +228,21 @@ export function LightboxModal({
               </div>
             ) : null}
 
+            {image.degraded && image.degraded.length > 0 ? (
+              <div className="flex items-start gap-2 rounded-[8px] border border-amber-500/30 bg-amber-500/10 p-2.5 text-[11px] text-amber-500">
+                <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span>
+                  {image.degraded.includes('aspect_ratio')
+                    ? `Aspect ratio not applied by this model${
+                        image.degraded.length > 1
+                          ? ` (${image.degraded.filter((k) => k !== 'aspect_ratio').join(', ')} also dropped)`
+                          : ''
+                      }`
+                    : `Dropped by model: ${image.degraded.join(', ')}`}
+                </span>
+              </div>
+            ) : null}
+
             <div className="space-y-1.5">
               <div className="text-[12px] font-medium text-[var(--muted-foreground)]">
                 Prompt used

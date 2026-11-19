@@ -26,6 +26,32 @@ import {
 } from '@/lib/db';
 import { cn } from '@/lib/utils';
 
+const DEGRADED_LABELS: Record<string, string> = {
+  aspect_ratio: 'Aspect ratio',
+  resolution: 'Resolution',
+  quality: 'Quality',
+  background: 'Background',
+  output_format: 'Output format',
+  seed: 'Seed',
+  image_config: 'Color palette config',
+};
+
+function formatDegradedSummary(degraded?: string[]): string | null {
+  if (!degraded || degraded.length === 0) return null;
+  if (degraded.length === 1) {
+    const label = DEGRADED_LABELS[degraded[0]] ?? degraded[0];
+    return `${label} not applied by this model`;
+  }
+  const hasAspect = degraded.includes('aspect_ratio');
+  const others = degraded
+    .filter((k) => k !== 'aspect_ratio')
+    .map((k) => DEGRADED_LABELS[k] ?? k);
+  if (hasAspect) {
+    return `Aspect ratio not applied by this model (${others.join(', ')} also dropped)`;
+  }
+  return `${others.join(', ')} not applied by this model`;
+}
+
 interface ImageResultCardProps {
   image: GeneratedImageItem;
   productName: string;
@@ -208,6 +234,16 @@ export function ImageResultCard({
 
       {/* Card Body */}
       <div className="flex flex-1 flex-col gap-3 p-3.5">
+        {(() => {
+          const degradedNote = formatDegradedSummary(image.degraded);
+          return degradedNote ? (
+            <div className="flex items-center gap-1.5 rounded-[6px] border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-500">
+              <Info className="h-3.5 w-3.5 shrink-0" />
+              <span>{degradedNote}</span>
+            </div>
+          ) : null;
+        })()}
+
         {/* Packshot Checker Badges (white-background shots) or SVG skip note */}
         {isWhiteBackgroundShot && isSvg ? (
           <div className="flex items-center gap-1.5 border-b border-[var(--border)] pb-2.5 text-[11px] text-[var(--muted-foreground)]">

@@ -724,6 +724,7 @@ export interface GeneratedImageResult {
   cost: number | null;
   seed?: number;
   durationMs: number;
+  degraded: string[];
 }
 
 function buildImagePayload(
@@ -773,7 +774,8 @@ function buildImagePayload(
     params.inputReferences.length > 0 &&
     supports('input_references')
   ) {
-    const maxRefs = paramMap?.input_references?.max ?? params.inputReferences.length;
+    const modelMaxRefs = paramMap?.input_references?.max ?? params.inputReferences.length;
+    const maxRefs = Math.min(4, Math.max(1, modelMaxRefs));
     body.input_references = params.inputReferences.slice(0, maxRefs);
   }
 
@@ -839,6 +841,16 @@ async function postImagesWithRetry(
   return lastResponse!;
 }
 
+const TRACKED_OPTIONAL_KEYS = [
+  'aspect_ratio',
+  'resolution',
+  'quality',
+  'background',
+  'output_format',
+  'seed',
+  'image_config',
+] as const;
+
 /**
  * Generates a single image via OpenRouter POST /api/v1/images.
  */
@@ -849,10 +861,11 @@ export async function generateSingleImage(
   const headers = getHeadersRequired();
   const paramMap = await getModelParamMap(params.model);
 
-  let body = buildImagePayload(params, paramMap, {
+  const initialBody = buildImagePayload(params, paramMap, {
     includeOptional: true,
     includeImageConfig: true,
   });
+  let body = initialBody;
 
   let response = await postImagesWithRetry(headers, body);
 
@@ -889,6 +902,16 @@ export async function generateSingleImage(
     throw new OpenRouterApiError(response.status, rawMessage);
   }
 
+  const degraded: string[] = [];
+  for (const key of TRACKED_OPTIONAL_KEYS) {
+    if (
+      Object.prototype.hasOwnProperty.call(initialBody, key) &&
+      !Object.prototype.hasOwnProperty.call(body, key)
+    ) {
+      degraded.push(key);
+    }
+  }
+
   const data = (await response.json()) as {
     data?: Array<{ b64_json?: string; media_type?: string; url?: string }>;
     usage?: { cost?: number };
@@ -905,17 +928,27 @@ export async function generateSingleImage(
     cost: typeof data?.usage?.cost === 'number' ? data.usage.cost : null,
     seed: params.seed,
     durationMs: Date.now() - startedAt,
+    degraded,
   };
 }
 
+export interface EnhancePromptResult {
+  prompt: string;
+  cost: number | null;
+}
+
 /**
- * Enhances a deterministic prompt via OpenRouter Chat Completions.
+ * Enhances a deterministic prompt via OpenRouter Chat Completions and returns text + reported cost.
  */
-export async function enhancePromptWithAI(deterministicPrompt: string): Promise<string | null> {
+export async function enhancePromptWithUsage(
+  deterministicPrompt: string,
+  modelOverride?: string
+): Promise<EnhancePromptResult | null> {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) return null;
 
-  const enhancerModel = process.env.OPENROUTER_ENHANCER_MODEL || 'openai/gpt-4o-mini';
+  const enhancerModel =
+    modelOverride || process.env.OPENROUTER_ENHANCER_MODEL || 'openai/gpt-4o-mini';
 
   const systemPrompt = [
     'You are an expert commercial product photography director.',
@@ -960,6 +993,7 @@ export async function enhancePromptWithAI(deterministicPrompt: string): Promise<
 
     const json = (await res.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
+      usage?: { cost?: number };
     };
     const content = json?.choices?.[0]?.message?.content?.trim();
     if (!content || content.length < 20) return null;
@@ -969,8 +1003,24 @@ export async function enhancePromptWithAI(deterministicPrompt: string): Promise<
       return null;
     }
 
-    return content;
+    const reportedCost =
+      typeof json?.usage?.cost === 'number' && Number.isFinite(json.usage.cost)
+        ? json.usage.cost
+        : null;
+
+    return {
+      prompt: content,
+      cost: reportedCost,
+    };
   } catch {
     return null;
   }
+}
+
+/**
+ * Enhances a deterministic prompt via OpenRouter Chat Completions.
+ */
+export async function enhancePromptWithAI(deterministicPrompt: string): Promise<string | null> {
+  const result = await enhancePromptWithUsage(deterministicPrompt);
+  return result?.prompt ?? null;
 }

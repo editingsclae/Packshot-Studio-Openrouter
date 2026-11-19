@@ -1,12 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
-import { enhancePromptWithAI } from '@/lib/openrouter';
+import {
+  authorizeSpend,
+  ENHANCE_ESTIMATE_USD,
+  isEnhancerModelAllowed,
+  recordSpend,
+} from '@/lib/budget';
+import { enhancePromptWithUsage } from '@/lib/openrouter';
 import { checkRateLimit, getClientIp } from '@/lib/rate-limit';
 
+export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 
 const EnhanceSchema = z.object({
-  prompt: z.string().trim().min(10, 'Prompt is too short.').max(2000, 'Prompt exceeds 2000 characters.'),
+  prompt: z
+    .string()
+    .trim()
+    .min(10, 'Prompt is too short.')
+    .max(2000, 'Prompt exceeds 2000 characters.'),
 });
 
 export async function POST(req: NextRequest) {
@@ -34,8 +45,22 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const enhancerModel =
+    process.env.OPENROUTER_ENHANCER_MODEL?.trim() || 'openai/gpt-4o-mini';
+  if (!isEnhancerModelAllowed(enhancerModel)) {
+    return NextResponse.json(
+      { error: `Enhancer model "${enhancerModel}" is not allowed on this server.` },
+      { status: 403 }
+    );
+  }
+
+  const authz = await authorizeSpend(ENHANCE_ESTIMATE_USD);
+  if (!authz.allowed) {
+    return NextResponse.json({ error: authz.error }, { status: authz.status });
+  }
+
   const deterministicPrompt = parsed.data.prompt;
-  const enhanced = await enhancePromptWithAI(deterministicPrompt);
+  const enhanced = await enhancePromptWithUsage(deterministicPrompt, enhancerModel);
 
   if (!enhanced) {
     return NextResponse.json({
@@ -44,8 +69,10 @@ export async function POST(req: NextRequest) {
     });
   }
 
+  await recordSpend(enhanced.cost ?? ENHANCE_ESTIMATE_USD);
+
   return NextResponse.json({
-    prompt: enhanced,
+    prompt: enhanced.prompt,
     enhanced: true,
   });
 }

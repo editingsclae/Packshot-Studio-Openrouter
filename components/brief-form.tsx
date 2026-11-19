@@ -9,6 +9,7 @@ import {
   type ProductBrief,
 } from '@/lib/prompt-engine';
 import type { NormalizedImageModel } from '@/lib/models';
+import { downscaleImageToMaxDim } from '@/lib/packshot-crop';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
@@ -49,8 +50,8 @@ export function BriefForm({
 
   const maxAllowedRefs =
     selectedModel.supportsReference && selectedModel.maxReferences > 0
-      ? selectedModel.maxReferences
-      : 10;
+      ? Math.min(4, selectedModel.maxReferences)
+      : 4;
 
   const updateField = <K extends keyof ProductBrief>(key: K, value: ProductBrief[K]) => {
     onChange({ ...brief, [key]: value });
@@ -112,8 +113,18 @@ export function BriefForm({
       (file) =>
         new Promise<string | null>((resolve) => {
           const reader = new FileReader();
-          reader.onload = () =>
-            resolve(typeof reader.result === 'string' ? reader.result : null);
+          reader.onload = async () => {
+            if (typeof reader.result !== 'string') {
+              resolve(null);
+              return;
+            }
+            try {
+              const optimized = await downscaleImageToMaxDim(reader.result, 2048);
+              resolve(optimized);
+            } catch {
+              resolve(reader.result);
+            }
+          };
           reader.onerror = () => resolve(null);
           reader.readAsDataURL(file);
         })
@@ -124,7 +135,7 @@ export function BriefForm({
     );
 
     if (results.length > 0) {
-      onInputReferencesChange([...inputReferences, ...results]);
+      onInputReferencesChange([...inputReferences, ...results].slice(0, maxAllowedRefs));
       if (inputMode !== 'photo') {
         onInputModeChange('photo');
       }

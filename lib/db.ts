@@ -19,6 +19,7 @@ export interface GeneratedImageItem {
   cost: number | null;
   durationMs: number;
   packshotCheck?: PackshotCheckResult;
+  degraded?: string[];
   favorite?: boolean;
 }
 

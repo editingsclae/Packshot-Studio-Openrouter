@@ -408,8 +408,31 @@ export async function autoCropAndCenterImage(
   };
 }
 
+const MAX_REFERENCE_DATA_URL_BYTES = 3 * 1024 * 1024; // 3 MB
+
+function detectAlphaTransparency(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number
+): boolean {
+  const sampleMax = 512;
+  const stepX = Math.max(1, Math.floor(width / sampleMax));
+  const stepY = Math.max(1, Math.floor(height / sampleMax));
+  const pixels = ctx.getImageData(0, 0, width, height).data;
+  for (let y = 0; y < height; y += stepY) {
+    const rowOffset = y * width * 4;
+    for (let x = 0; x < width; x += stepX) {
+      if (pixels[rowOffset + x * 4 + 3] < 250) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 /**
  * Downscales an image (or rasterizes SVG) so its longest dimension is at most maxDim (default 2048px).
+ * Outputs JPEG (quality 0.9) unless source pixels contain alpha transparency, and keeps size under 3 MB.
  */
 export async function downscaleImageToMaxDim(
   dataUrl: string,
@@ -419,29 +442,69 @@ export async function downscaleImageToMaxDim(
   const w = Math.max(1, img.naturalWidth || img.width);
   const h = Math.max(1, img.naturalHeight || img.height);
   const isSvg = dataUrl.startsWith('data:image/svg');
+  const isAlreadyJpeg =
+    dataUrl.startsWith('data:image/jpeg') || dataUrl.startsWith('data:image/jpg');
 
-  if (!isSvg && Math.max(w, h) <= maxDim) {
+  if (
+    isAlreadyJpeg &&
+    Math.max(w, h) <= maxDim &&
+    dataUrl.length <= MAX_REFERENCE_DATA_URL_BYTES
+  ) {
     return dataUrl;
   }
 
-  const scale = Math.min(1, maxDim / Math.max(w, h));
-  const outW = Math.max(1, Math.round(w * scale));
-  const outH = Math.max(1, Math.round(h * scale));
+  let targetMax = maxDim;
+  for (let pass = 0; pass < 4; pass++) {
+    const scale = Math.min(1, targetMax / Math.max(w, h));
+    const outW = Math.max(1, Math.round(w * scale));
+    const outH = Math.max(1, Math.round(h * scale));
 
-  const canvas = document.createElement('canvas');
-  canvas.width = outW;
-  canvas.height = outH;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return dataUrl;
+    const canvas = document.createElement('canvas');
+    canvas.width = outW;
+    canvas.height = outH;
+    const ctx = canvas.getContext('2d', { willReadFrequently: !isSvg && !isAlreadyJpeg });
+    if (!ctx) return dataUrl;
 
-  if (isSvg) {
-    ctx.fillStyle = '#FFFFFF';
-    ctx.fillRect(0, 0, outW, outH);
+    ctx.clearRect(0, 0, outW, outH);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, 0, 0, outW, outH);
+
+    const hasTransparency =
+      !isSvg && !isAlreadyJpeg && detectAlphaTransparency(ctx, outW, outH);
+
+    if (hasTransparency) {
+      const pngUrl = canvas.toDataURL('image/png');
+      if (pngUrl.length <= MAX_REFERENCE_DATA_URL_BYTES) {
+        return pngUrl;
+      }
+      // If transparent PNG still exceeds 3 MB at smaller passes, composite on white JPEG as last resort
+      if (pass < 3) {
+        targetMax = Math.max(512, Math.round(targetMax * 0.72));
+        continue;
+      }
+    }
+
+    // Fill white under transparent/SVG before JPEG encoding
+    const jpegCanvas = document.createElement('canvas');
+    jpegCanvas.width = outW;
+    jpegCanvas.height = outH;
+    const jctx = jpegCanvas.getContext('2d');
+    if (!jctx) return canvas.toDataURL('image/jpeg', 0.9);
+    jctx.fillStyle = '#FFFFFF';
+    jctx.fillRect(0, 0, outW, outH);
+    jctx.drawImage(canvas, 0, 0);
+
+    for (const quality of [0.9, 0.82, 0.74, 0.65]) {
+      const jpegUrl = jpegCanvas.toDataURL('image/jpeg', quality);
+      if (jpegUrl.length <= MAX_REFERENCE_DATA_URL_BYTES) {
+        return jpegUrl;
+      }
+    }
+
+    targetMax = Math.max(512, Math.round(targetMax * 0.72));
   }
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(img, 0, 0, outW, outH);
 
-  return canvas.toDataURL('image/png');
+  return dataUrl;
 }
 

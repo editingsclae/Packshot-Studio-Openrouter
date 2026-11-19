@@ -110,6 +110,16 @@ interface PendingGenerationOverride {
   enhance?: boolean;
 }
 
+interface PendingImageSlot {
+  id: string;
+  shotId: ShotPresetId;
+  aspectRatio: AspectRatio;
+  variationIndex: number;
+  status: 'queued' | 'generating' | 'done' | 'error';
+  error?: string;
+  image?: GeneratedImageItem;
+}
+
 const SHOT_SET_PRESET_IDS: readonly ShotPresetId[] = [
   'marketplace-packshot',
   'lifestyle-scene',
@@ -251,6 +261,7 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
   const [isGenerating, setIsGenerating] = useState(false);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [pendingSlots, setPendingSlots] = useState(0);
+  const [pendingImageSlots, setPendingImageSlots] = useState<PendingImageSlot[]>([]);
   const [currentRecord, setCurrentRecord] = useState<GenerationRecord | null>(null);
   const [generationErrors, setGenerationErrors] = useState<string[]>([]);
   const [unavailableModelBanner, setUnavailableModelBanner] = useState<string | null>(null);
@@ -642,7 +653,18 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: activePrompt }),
       });
-      const json = (await res.json()) as { prompt?: string; enhanced?: boolean };
+      const json = (await res.json()) as {
+        prompt?: string;
+        enhanced?: boolean;
+        error?: string;
+      };
+      if (!res.ok) {
+        if (res.status === 402 && json.error) {
+          setSpendLimitNotice(json.error);
+        }
+        toast.error(json.error || 'Prompt enhancer failed');
+        return;
+      }
       if (json?.prompt) {
         setManualPromptText(json.prompt);
         setPromptEditedManually(true);
@@ -659,13 +681,424 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
     }
   }, [activePrompt, isEnhancingPreview]);
 
+  const runPerImageBatch = useCallback(
+    async (
+      targetModel: NormalizedImageModel,
+      tasks: Array<{
+        id: string;
+        shotId: ShotPresetId;
+        aspectRatio: AspectRatio;
+        variationIndex: number;
+        prompt: string;
+        promptEditedManually: boolean;
+        enhance: boolean;
+        refineChipIds: string[];
+        isWhiteBg: boolean;
+        seed?: number;
+      }>,
+      shotSetPresets: ShotPresetId[] | null
+    ) => {
+      if (isGenerating || tasks.length === 0) return;
+
+      const batchStart = Date.now();
+      const CONCURRENCY_CAP = 4;
+
+      setIsGenerating(true);
+      setElapsedMs(0);
+      setPendingSlots(tasks.length);
+      setGeneratingShotSetPresets(shotSetPresets);
+      setGenerationErrors([]);
+      setUnavailableModelBanner(null);
+      setPendingImageSlots(
+        tasks.map((t) => ({
+          id: t.id,
+          shotId: t.shotId,
+          aspectRatio: t.aspectRatio,
+          variationIndex: t.variationIndex,
+          status: 'queued',
+        }))
+      );
+
+      type TaskResult =
+        | {
+            status: 'done';
+            task: (typeof tasks)[number];
+            image: GeneratedImageItem;
+            promptUsed: string;
+            enhanced: boolean;
+            modelTier: ModelTier;
+            estimatedCostUsd: number;
+            actualCostUsd: number | null;
+            durationMs: number;
+          }
+        | {
+            status: 'error';
+            task: (typeof tasks)[number];
+            error: string;
+          };
+
+      const results: Array<TaskResult | undefined> = new Array(tasks.length);
+      let nextIndex = 0;
+      let firstUnavailableBanner: string | null = null;
+      let firstSpendLimitError: string | null = null;
+
+      const refSlice =
+        targetModel.supportsReference && inputReferences.length > 0
+          ? inputReferences.slice(0, Math.min(4, Math.max(1, targetModel.maxReferences)))
+          : undefined;
+
+      const safeResolution = getSafeResolutionForRequest(resolution, targetModel);
+
+      async function worker() {
+        while (true) {
+          const idx = nextIndex++;
+          if (idx >= tasks.length) return;
+          const task = tasks[idx];
+
+          setPendingImageSlots((prev) =>
+            prev.map((s) => (s.id === task.id ? { ...s, status: 'generating' } : s))
+          );
+
+          try {
+            const res = await fetch('/api/generate', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                prompt: task.prompt,
+                model: targetModel.id,
+                aspectRatio: task.aspectRatio,
+                resolution: safeResolution,
+                quality: effectiveQuality !== 'auto' ? effectiveQuality : undefined,
+                background: backgroundMode !== 'auto' ? backgroundMode : undefined,
+                outputFormat: outputFormat !== 'auto' ? outputFormat : undefined,
+                variations: 1,
+                enhance: task.enhance,
+                promptEditedManually: task.promptEditedManually,
+                rgbColors: brief.colors,
+                backgroundRgbColor: task.isWhiteBg
+                  ? '#FFFFFF'
+                  : brief.useBackgroundColor
+                    ? brief.backgroundColor
+                    : undefined,
+                inputReferences: refSlice,
+                baseSeed: task.seed,
+              }),
+            });
+
+            const payload = (await res.json().catch(() => ({}))) as {
+              error?: string;
+              isModelUnavailable?: boolean;
+              promptUsed?: string;
+              enhanced?: boolean;
+              modelTier?: ModelTier;
+              actualCost?: number | null;
+              degraded?: string[];
+              images?: Array<{
+                index: number;
+                dataUrl: string;
+                mediaType: string;
+                seed?: number;
+                cost: number | null;
+                durationMs: number;
+                degraded?: string[];
+              }>;
+              errors?: Array<{ message: string; isModelUnavailable?: boolean }>;
+              totalCost?: number;
+              totalDurationMs?: number;
+            };
+
+            if (!res.ok) {
+              const errMsg = payload.error || `Request failed (${res.status})`;
+              if (res.status === 404 || res.status === 410 || payload.isModelUnavailable) {
+                firstUnavailableBanner ??=
+                  payload.error ||
+                  `Model ${targetModel.name} returned ${res.status}. Pick another model to continue.`;
+              }
+              if (res.status === 402) {
+                firstSpendLimitError ??= errMsg;
+              }
+              results[idx] = { status: 'error', task, error: errMsg };
+              setPendingImageSlots((prev) =>
+                prev.map((s) =>
+                  s.id === task.id ? { ...s, status: 'error', error: errMsg } : s
+                )
+              );
+              continue;
+            }
+
+            const rawImg = payload.images?.[0];
+            if (!rawImg) {
+              const errMsg =
+                payload.errors?.[0]?.message ||
+                payload.error ||
+                'No image returned';
+              if (payload.errors?.[0]?.isModelUnavailable) {
+                firstUnavailableBanner ??= errMsg;
+              }
+              results[idx] = { status: 'error', task, error: errMsg };
+              setPendingImageSlots((prev) =>
+                prev.map((s) =>
+                  s.id === task.id ? { ...s, status: 'error', error: errMsg } : s
+                )
+              );
+              continue;
+            }
+
+            let packshotCheck = undefined;
+            if (task.isWhiteBg && !isSvgMedia(rawImg.mediaType, rawImg.dataUrl)) {
+              try {
+                packshotCheck = await analyzePackshotImage(rawImg.dataUrl);
+              } catch {
+                packshotCheck = undefined;
+              }
+            }
+
+            const degraded =
+              rawImg.degraded && rawImg.degraded.length > 0
+                ? rawImg.degraded
+                : payload.degraded && payload.degraded.length > 0
+                  ? payload.degraded
+                  : undefined;
+
+            const processedImage: GeneratedImageItem = {
+              id: `${Date.now()}-${task.shotId}-${task.variationIndex}-${Math.random().toString(36).slice(2, 7)}`,
+              dataUrl: rawImg.dataUrl,
+              mediaType: rawImg.mediaType,
+              seed: rawImg.seed,
+              cost: rawImg.cost,
+              durationMs: rawImg.durationMs,
+              packshotCheck,
+              favorite: false,
+              degraded,
+            };
+
+            const slotActualCost =
+              typeof rawImg.cost === 'number' && Number.isFinite(rawImg.cost)
+                ? rawImg.cost
+                : typeof payload.actualCost === 'number' &&
+                    Number.isFinite(payload.actualCost)
+                  ? payload.actualCost
+                  : null;
+
+            results[idx] = {
+              status: 'done',
+              task,
+              image: processedImage,
+              promptUsed: payload.promptUsed || task.prompt,
+              enhanced: Boolean(payload.enhanced),
+              modelTier: payload.modelTier ?? targetModel.tier,
+              estimatedCostUsd: payload.totalCost ?? 0,
+              actualCostUsd: slotActualCost,
+              durationMs: rawImg.durationMs || payload.totalDurationMs || 0,
+            };
+
+            setPendingImageSlots((prev) =>
+              prev.map((s) =>
+                s.id === task.id
+                  ? { ...s, status: 'done', image: processedImage }
+                  : s
+              )
+            );
+          } catch {
+            const errMsg = 'Network error reaching generation endpoint.';
+            results[idx] = { status: 'error', task, error: errMsg };
+            setPendingImageSlots((prev) =>
+              prev.map((s) =>
+                s.id === task.id ? { ...s, status: 'error', error: errMsg } : s
+              )
+            );
+          }
+        }
+      }
+
+      try {
+        await Promise.all(
+          Array.from(
+            { length: Math.min(CONCURRENCY_CAP, tasks.length) },
+            () => worker()
+          )
+        );
+
+        if (firstUnavailableBanner) {
+          setUnavailableModelBanner(firstUnavailableBanner);
+        }
+        if (firstSpendLimitError) {
+          setSpendLimitNotice(firstSpendLimitError);
+        }
+
+        const settled = results.filter(
+          (r): r is TaskResult => Boolean(r)
+        );
+        const doneResults = settled.filter(
+          (r): r is Extract<TaskResult, { status: 'done' }> =>
+            r.status === 'done'
+        );
+        const errorResults = settled.filter(
+          (r): r is Extract<TaskResult, { status: 'error' }> =>
+            r.status === 'error'
+        );
+
+        let batchActualSpend = 0;
+        const costSamples: number[] = [];
+        for (const r of doneResults) {
+          if (typeof r.actualCostUsd === 'number' && Number.isFinite(r.actualCostUsd)) {
+            batchActualSpend += r.actualCostUsd;
+            costSamples.push(r.actualCostUsd);
+          }
+        }
+
+        if (batchActualSpend > 0) {
+          setSessionSpendUsd((prev) => prev + batchActualSpend);
+        }
+        if (costSamples.length > 0) {
+          setCostStats((prev) => {
+            let next = prev;
+            for (const sample of costSamples) {
+              next = recordModelCostSample(next, targetModel.id, sample);
+            }
+            void saveModelCostStats(next);
+            return next;
+          });
+        }
+
+        const totalElapsed = Date.now() - batchStart;
+
+        if (shotSetPresets && shotSetPresets.length > 0) {
+          const completedGroups: ShotSetGroup[] = [];
+          for (const presetId of shotSetPresets) {
+            const groupDone = doneResults.filter(
+              (r) => r.task.shotId === presetId
+            );
+            if (groupDone.length === 0) continue;
+
+            const groupActual = groupDone.reduce(
+              (sum, r) => sum + (r.actualCostUsd ?? 0),
+              0
+            );
+            const hasGroupActual = groupDone.some(
+              (r) => r.actualCostUsd !== null
+            );
+            const rec: GenerationRecord = {
+              id: `gen-${Date.now()}-${presetId}-${Math.random().toString(36).slice(2, 7)}`,
+              createdAt: Date.now(),
+              brief: { ...brief },
+              shotId: presetId,
+              modelId: targetModel.id,
+              modelTier: groupDone[0].modelTier,
+              aspectRatio: groupDone[0].task.aspectRatio,
+              prompt: groupDone[0].promptUsed,
+              enhanced: groupDone.some((r) => r.enhanced),
+              refineChips: groupDone[0].task.refineChipIds,
+              images: groupDone.map((r) => r.image),
+              totalCost: groupDone.reduce((s, r) => s + r.estimatedCostUsd, 0),
+              actualCost: hasGroupActual ? groupActual : null,
+              totalDurationMs: groupDone.reduce((max, r) => Math.max(max, r.durationMs), 0),
+            };
+            completedGroups.push({ shotId: presetId, record: rec });
+          }
+
+          if (completedGroups.length > 0) {
+            const createdRecords = completedGroups.map((g) => g.record);
+            setCurrentShotSet(completedGroups);
+            setCurrentRecord(createdRecords[0]);
+            setHistory((prev) => {
+              const next = [...createdRecords, ...prev].slice(0, 100);
+              void saveHistory(next);
+              return next;
+            });
+          }
+
+          const collectedErrors = errorResults.map((e) => {
+            const presetName = getShotPreset(e.task.shotId).name;
+            return `${presetName} (var ${e.task.variationIndex + 1}): ${e.error}`;
+          });
+          if (collectedErrors.length > 0) {
+            setGenerationErrors(collectedErrors);
+            if (doneResults.length > 0) {
+              toast.warning(
+                `Shot set finished: ${doneResults.length} of ${tasks.length} images generated (${collectedErrors.length} failed)`
+              );
+            } else {
+              toast.error(collectedErrors[0] || 'Shot set generation failed');
+            }
+          } else {
+            toast.success(
+              `Generated shot set: ${completedGroups.length} presets (${doneResults.length} images)`
+            );
+          }
+        } else {
+          if (doneResults.length > 0) {
+            const hasBatchActual = doneResults.some(
+              (r) => r.actualCostUsd !== null
+            );
+            const newRecord: GenerationRecord = {
+              id: `gen-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+              createdAt: Date.now(),
+              brief: { ...brief },
+              shotId: doneResults[0].task.shotId,
+              modelId: targetModel.id,
+              modelTier: doneResults[0].modelTier,
+              aspectRatio: doneResults[0].task.aspectRatio,
+              prompt: doneResults[0].promptUsed,
+              enhanced: doneResults.some((r) => r.enhanced),
+              refineChips: doneResults[0].task.refineChipIds,
+              images: doneResults.map((r) => r.image),
+              totalCost: doneResults.reduce((s, r) => s + r.estimatedCostUsd, 0),
+              actualCost: hasBatchActual ? batchActualSpend : null,
+              totalDurationMs: totalElapsed,
+            };
+
+            setCurrentShotSet(null);
+            setCurrentRecord(newRecord);
+            setHistory((prev) => {
+              const next = [newRecord, ...prev].slice(0, 100);
+              void saveHistory(next);
+              return next;
+            });
+          }
+
+          const collectedErrors = errorResults.map(
+            (e) => `Variation ${e.task.variationIndex + 1}: ${e.error}`
+          );
+          if (collectedErrors.length > 0) {
+            setGenerationErrors(collectedErrors);
+            if (doneResults.length > 0) {
+              toast.warning(
+                `${doneResults.length} of ${tasks.length} variations generated (${collectedErrors.length} failed)`
+              );
+            } else {
+              toast.error(errorResults[0]?.error || 'Generation failed');
+            }
+          } else if (doneResults.length > 0) {
+            toast.success(
+              `Generated ${doneResults.length} ${doneResults.length === 1 ? 'image' : 'images'}`
+            );
+          }
+        }
+      } finally {
+        setIsGenerating(false);
+        setElapsedMs(0);
+        setPendingSlots(0);
+        setPendingImageSlots([]);
+        setGeneratingShotSetPresets(null);
+      }
+    },
+    [
+      isGenerating,
+      inputReferences,
+      resolution,
+      effectiveQuality,
+      backgroundMode,
+      outputFormat,
+      brief,
+    ]
+  );
+
   const executeGeneration = useCallback(
     async (
       targetModel: NormalizedImageModel,
       override?: PendingGenerationOverride
     ) => {
-      if (isGenerating) return;
-
       const targetPrompt = override?.prompt ?? activePrompt;
       const targetEditedManually =
         override?.promptEditedManually ?? promptEditedManually;
@@ -677,181 +1110,42 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
           ? Math.min(2_147_483_647, Math.max(1, parseInt(customSeed.trim(), 10)))
           : undefined;
 
-      setIsGenerating(true);
-      setElapsedMs(0);
-      setPendingSlots(variations);
-      setGeneratingShotSetPresets(null);
-      setGenerationErrors([]);
-      setUnavailableModelBanner(null);
+      const isWhiteBg =
+        selectedShot.isWhiteBackground ||
+        (brief.useBackgroundColor &&
+          brief.backgroundColor.toUpperCase() === '#FFFFFF');
 
-      try {
-        const res = await fetch('/api/generate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            prompt: targetPrompt,
-            model: targetModel.id,
-            aspectRatio,
-            resolution: getSafeResolutionForRequest(resolution, targetModel),
-            quality: effectiveQuality !== 'auto' ? effectiveQuality : undefined,
-            background: backgroundMode !== 'auto' ? backgroundMode : undefined,
-            outputFormat: outputFormat !== 'auto' ? outputFormat : undefined,
-            variations,
-            enhance: targetEnhance,
-            promptEditedManually: targetEditedManually,
-            rgbColors: brief.colors,
-            backgroundRgbColor: selectedShot.isWhiteBackground
-              ? '#FFFFFF'
-              : brief.useBackgroundColor
-                ? brief.backgroundColor
-                : undefined,
-            inputReferences:
-              targetModel.supportsReference && inputReferences.length > 0
-                ? inputReferences.slice(0, Math.max(1, targetModel.maxReferences))
-                : undefined,
-            baseSeed: parsedSeed,
-          }),
-        });
+      const tasks = Array.from({ length: variations }, (_, idx) => ({
+        id: `${shotId}-var-${idx}-${Date.now()}`,
+        shotId,
+        aspectRatio,
+        variationIndex: idx,
+        prompt: targetPrompt,
+        promptEditedManually: targetEditedManually,
+        enhance: targetEnhance,
+        refineChipIds: targetRefineChips,
+        isWhiteBg,
+        seed:
+          parsedSeed !== undefined
+            ? ((parsedSeed - 1 + idx) % 2_147_483_647) + 1
+            : undefined,
+      }));
 
-        const payload = (await res.json()) as {
-          error?: string;
-          isModelUnavailable?: boolean;
-          promptUsed?: string;
-          enhanced?: boolean;
-          modelTier?: ModelTier;
-          actualCost?: number | null;
-          images?: Array<{
-            index: number;
-            dataUrl: string;
-            mediaType: string;
-            seed?: number;
-            cost: number | null;
-            durationMs: number;
-          }>;
-          errors?: Array<{ message: string; isModelUnavailable?: boolean }>;
-          totalCost?: number;
-          totalDurationMs?: number;
-        };
-
-        if (!res.ok) {
-          if (res.status === 404 || res.status === 410 || payload.isModelUnavailable) {
-            setUnavailableModelBanner(
-              payload.error ||
-                `Model ${targetModel.name} returned ${res.status}. Pick another model to continue.`
-            );
-          }
-          toast.error(payload.error || 'Generation failed');
-          return;
-        }
-
-        const rawImages = payload.images ?? [];
-        const isWhiteBg =
-          selectedShot.isWhiteBackground ||
-          (brief.useBackgroundColor &&
-            brief.backgroundColor.toUpperCase() === '#FFFFFF');
-
-        const processedImages: GeneratedImageItem[] = await Promise.all(
-          rawImages.map(async (img) => {
-            let packshotCheck = undefined;
-            if (isWhiteBg && !isSvgMedia(img.mediaType, img.dataUrl)) {
-              try {
-                packshotCheck = await analyzePackshotImage(img.dataUrl);
-              } catch {
-                packshotCheck = undefined;
-              }
-            }
-            return {
-              id: `${Date.now()}-${img.index}-${Math.random().toString(36).slice(2, 7)}`,
-              dataUrl: img.dataUrl,
-              mediaType: img.mediaType,
-              seed: img.seed,
-              cost: img.cost,
-              durationMs: img.durationMs,
-              packshotCheck,
-              favorite: false,
-            };
-          })
-        );
-
-        const newRecord: GenerationRecord = {
-          id: `gen-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          createdAt: Date.now(),
-          brief: { ...brief },
-          shotId,
-          modelId: targetModel.id,
-          modelTier: payload.modelTier ?? targetModel.tier,
-          aspectRatio,
-          prompt: payload.promptUsed || targetPrompt,
-          enhanced: Boolean(payload.enhanced),
-          refineChips: targetRefineChips,
-          images: processedImages,
-          totalCost: payload.totalCost ?? 0,
-          actualCost: payload.actualCost ?? null,
-          totalDurationMs: payload.totalDurationMs ?? 0,
-        };
-
-        setCurrentShotSet(null);
-        setCurrentRecord(newRecord);
-        setHistory((prev) => {
-          const next = [newRecord, ...prev].slice(0, 100);
-          void saveHistory(next);
-          return next;
-        });
-
-        // Record actualCost into session spend & per-model cost stats store
-        if (
-          typeof payload.actualCost === 'number' &&
-          Number.isFinite(payload.actualCost)
-        ) {
-          const runActualCost = payload.actualCost;
-          setSessionSpendUsd((prev) => prev + runActualCost);
-
-          if (processedImages.length > 0) {
-            const perImageCost = runActualCost / processedImages.length;
-            setCostStats((prev) => {
-              const next = recordModelCostSample(prev, targetModel.id, perImageCost);
-              void saveModelCostStats(next);
-              return next;
-            });
-          }
-        }
-
-        if (payload.errors && payload.errors.length > 0) {
-          setGenerationErrors(payload.errors.map((e) => e.message));
-          toast.warning(
-            `${processedImages.length} of ${variations} variations generated (${payload.errors.length} failed)`
-          );
-        } else {
-          toast.success(
-            `Generated ${processedImages.length} ${processedImages.length === 1 ? 'image' : 'images'}`
-          );
-        }
-      } catch {
-        toast.error('Network error reaching generation endpoint.');
-      } finally {
-        setIsGenerating(false);
-        setElapsedMs(0);
-        setPendingSlots(0);
-        setGeneratingShotSetPresets(null);
-      }
+      await runPerImageBatch(targetModel, tasks, null);
     },
     [
-      isGenerating,
       activePrompt,
       promptEditedManually,
       activeRefineChips,
       enhanceEnabled,
       customSeed,
-      variations,
-      aspectRatio,
-      resolution,
-      effectiveQuality,
-      backgroundMode,
-      outputFormat,
-      brief,
       selectedShot.isWhiteBackground,
-      inputReferences,
+      brief.useBackgroundColor,
+      brief.backgroundColor,
+      variations,
       shotId,
+      aspectRatio,
+      runPerImageBatch,
     ]
   );
 
@@ -860,248 +1154,56 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
       targetModel: NormalizedImageModel,
       presetList: ShotPresetId[]
     ) => {
-      if (isGenerating || presetList.length === 0) return;
+      if (presetList.length === 0) return;
 
       const parsedSeed =
         customSeed.trim() && /^\d+$/.test(customSeed.trim())
           ? Math.min(2_147_483_647, Math.max(1, parseInt(customSeed.trim(), 10)))
           : undefined;
 
-      setIsGenerating(true);
-      setElapsedMs(0);
-      setPendingSlots(presetList.length * variations);
-      setGeneratingShotSetPresets(presetList);
-      setGenerationErrors([]);
-      setUnavailableModelBanner(null);
-
-      try {
-        const refSlice =
-          targetModel.supportsReference && inputReferences.length > 0
-            ? inputReferences.slice(0, Math.max(1, targetModel.maxReferences))
-            : undefined;
-
-        const results = await Promise.all(
-          presetList.map(async (presetId, presetIdx) => {
-            const presetSpec = getShotPreset(presetId);
-            const presetRatio = resolveModelAspectRatio(
-              presetSpec.defaultAspectRatio,
-              targetModel
-            );
-            const presetPrompt = buildPreservationPrompt(brief, presetId, {
-              refineChipIds: activeRefineChips,
-            });
-            const presetSeed = parsedSeed
-              ? (parsedSeed + presetIdx * 31337) % 2_147_483_647
-              : undefined;
-
-            const res = await fetch('/api/generate', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                prompt: presetPrompt,
-                model: targetModel.id,
-                aspectRatio: presetRatio,
-                resolution: getSafeResolutionForRequest(resolution, targetModel),
-                quality: effectiveQuality !== 'auto' ? effectiveQuality : undefined,
-                background: backgroundMode !== 'auto' ? backgroundMode : undefined,
-                outputFormat: outputFormat !== 'auto' ? outputFormat : undefined,
-                variations,
-                enhance: enhanceEnabled,
-                promptEditedManually: false,
-                rgbColors: brief.colors,
-                backgroundRgbColor: presetSpec.isWhiteBackground
-                  ? '#FFFFFF'
-                  : brief.useBackgroundColor
-                    ? brief.backgroundColor
-                    : undefined,
-                inputReferences: refSlice,
-                baseSeed: presetSeed,
-              }),
-            });
-
-            const payload = (await res.json()) as {
-              error?: string;
-              isModelUnavailable?: boolean;
-              promptUsed?: string;
-              enhanced?: boolean;
-              modelTier?: ModelTier;
-              actualCost?: number | null;
-              images?: Array<{
-                index: number;
-                dataUrl: string;
-                mediaType: string;
-                seed?: number;
-                cost: number | null;
-                durationMs: number;
-              }>;
-              errors?: Array<{ message: string; isModelUnavailable?: boolean }>;
-              totalCost?: number;
-              totalDurationMs?: number;
-            };
-
-            return { presetId, presetSpec, presetRatio, presetPrompt, res, payload };
-          })
+      const tasks: Parameters<typeof runPerImageBatch>[1] = [];
+      presetList.forEach((presetId, presetIdx) => {
+        const presetSpec = getShotPreset(presetId);
+        const presetRatio = resolveModelAspectRatio(
+          presetSpec.defaultAspectRatio,
+          targetModel
         );
+        const presetPrompt = buildPreservationPrompt(brief, presetId, {
+          refineChipIds: activeRefineChips,
+        });
+        const isWhiteBg =
+          presetSpec.isWhiteBackground ||
+          (brief.useBackgroundColor &&
+            brief.backgroundColor.toUpperCase() === '#FFFFFF');
 
-        const completedGroups: ShotSetGroup[] = [];
-        const collectedErrors: string[] = [];
-        let batchActualSpend = 0;
-        let unavailableMessage: string | null = null;
-        const costSamples: number[] = [];
-
-        for (const item of results) {
-          if (!item.res.ok) {
-            if (
-              item.res.status === 404 ||
-              item.res.status === 410 ||
-              item.payload.isModelUnavailable
-            ) {
-              unavailableMessage =
-                item.payload.error ||
-                `Model ${targetModel.name} returned ${item.res.status}.`;
-            }
-            collectedErrors.push(
-              `${item.presetSpec.name}: ${item.payload.error || `HTTP ${item.res.status}`}`
-            );
-            continue;
-          }
-
-          if (item.payload.errors && item.payload.errors.length > 0) {
-            collectedErrors.push(
-              ...item.payload.errors.map((e) => `${item.presetSpec.name}: ${e.message}`)
-            );
-          }
-
-          const rawImages = item.payload.images ?? [];
-          if (rawImages.length === 0) continue;
-
-          const isWhiteBg =
-            item.presetSpec.isWhiteBackground ||
-            (brief.useBackgroundColor &&
-              brief.backgroundColor.toUpperCase() === '#FFFFFF');
-
-          const processedImages: GeneratedImageItem[] = await Promise.all(
-            rawImages.map(async (img) => {
-              let packshotCheck = undefined;
-              if (isWhiteBg && !isSvgMedia(img.mediaType, img.dataUrl)) {
-                try {
-                  packshotCheck = await analyzePackshotImage(img.dataUrl);
-                } catch {
-                  packshotCheck = undefined;
-                }
-              }
-              return {
-                id: `${Date.now()}-${item.presetId}-${img.index}-${Math.random().toString(36).slice(2, 7)}`,
-                dataUrl: img.dataUrl,
-                mediaType: img.mediaType,
-                seed: img.seed,
-                cost: img.cost,
-                durationMs: img.durationMs,
-                packshotCheck,
-                favorite: false,
-              };
-            })
-          );
-
-          const rec: GenerationRecord = {
-            id: `gen-${Date.now()}-${item.presetId}-${Math.random().toString(36).slice(2, 7)}`,
-            createdAt: Date.now(),
-            brief: { ...brief },
-            shotId: item.presetId,
-            modelId: targetModel.id,
-            modelTier: item.payload.modelTier ?? targetModel.tier,
-            aspectRatio: item.presetRatio,
-            prompt: item.payload.promptUsed || item.presetPrompt,
-            enhanced: Boolean(item.payload.enhanced),
-            refineChips: activeRefineChips,
-            images: processedImages,
-            totalCost: item.payload.totalCost ?? 0,
-            actualCost: item.payload.actualCost ?? null,
-            totalDurationMs: item.payload.totalDurationMs ?? 0,
-          };
-
-          completedGroups.push({ shotId: item.presetId, record: rec });
-
-          if (
-            typeof item.payload.actualCost === 'number' &&
-            Number.isFinite(item.payload.actualCost)
-          ) {
-            batchActualSpend += item.payload.actualCost;
-            if (processedImages.length > 0) {
-              costSamples.push(item.payload.actualCost / processedImages.length);
-            }
-          }
-        }
-
-        if (unavailableMessage) {
-          setUnavailableModelBanner(unavailableMessage);
-        }
-
-        if (completedGroups.length > 0) {
-          const createdRecords = completedGroups.map((g) => g.record);
-          setCurrentShotSet(completedGroups);
-          setCurrentRecord(createdRecords[0]);
-          setHistory((prev) => {
-            const next = [...createdRecords, ...prev].slice(0, 100);
-            void saveHistory(next);
-            return next;
+        for (let varIdx = 0; varIdx < variations; varIdx++) {
+          tasks.push({
+            id: `${presetId}-var-${varIdx}-${Date.now()}`,
+            shotId: presetId,
+            aspectRatio: presetRatio,
+            variationIndex: varIdx,
+            prompt: presetPrompt,
+            promptEditedManually: false,
+            enhance: enhanceEnabled,
+            refineChipIds: activeRefineChips,
+            isWhiteBg,
+            seed:
+              parsedSeed !== undefined
+                ? ((parsedSeed - 1 + presetIdx * 31337 + varIdx) % 2_147_483_647) + 1
+                : undefined,
           });
         }
+      });
 
-        if (batchActualSpend > 0) {
-          setSessionSpendUsd((prev) => prev + batchActualSpend);
-        }
-        if (costSamples.length > 0) {
-          setCostStats((prev) => {
-            let next = prev;
-            for (const sampleCost of costSamples) {
-              next = recordModelCostSample(next, targetModel.id, sampleCost);
-            }
-            void saveModelCostStats(next);
-            return next;
-          });
-        }
-
-        const totalImages = completedGroups.reduce(
-          (sum, g) => sum + g.record.images.length,
-          0
-        );
-
-        if (collectedErrors.length > 0) {
-          setGenerationErrors(collectedErrors);
-          if (totalImages > 0) {
-            toast.warning(
-              `Shot set finished with ${totalImages} images (${collectedErrors.length} error${collectedErrors.length === 1 ? '' : 's'})`
-            );
-          } else {
-            toast.error(collectedErrors[0] || 'Shot set generation failed');
-          }
-        } else {
-          toast.success(
-            `Generated shot set: ${completedGroups.length} presets (${totalImages} images)`
-          );
-        }
-      } catch {
-        toast.error('Network error reaching generation endpoint.');
-      } finally {
-        setIsGenerating(false);
-        setElapsedMs(0);
-        setPendingSlots(0);
-        setGeneratingShotSetPresets(null);
-      }
+      await runPerImageBatch(targetModel, tasks, presetList);
     },
     [
-      isGenerating,
       customSeed,
-      variations,
-      inputReferences,
       brief,
       activeRefineChips,
-      resolution,
-      effectiveQuality,
-      backgroundMode,
-      outputFormat,
+      variations,
       enhanceEnabled,
+      runPerImageBatch,
     ]
   );
 
@@ -2442,7 +2544,12 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
                   >
                     <span>
                       {isGenerating
-                        ? `Generating ${pendingSlots} ${pendingSlots === 1 ? 'shot' : 'shots'}...`
+                        ? (() => {
+                            const doneCount = pendingImageSlots.filter(
+                              (s) => s.status === 'done' || s.status === 'error'
+                            ).length;
+                            return `Generating ${doneCount}/${pendingSlots} shots...`;
+                          })()
                         : isShotSetActive
                           ? `Generate shot set (${totalPlannedShots} shots)`
                           : `Generate ${variations} ${variations === 1 ? 'shot' : 'shots'}`}
@@ -2533,12 +2640,28 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
               <div className="mb-5 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border)] pb-3">
                 <div className="flex flex-wrap items-center gap-2.5">
                   {isGenerating ? (
-                    <span className="inline-flex items-center gap-2 rounded-[6px] border border-[var(--border)] bg-[var(--card)] px-2.5 py-1 text-[12px] text-[var(--foreground)]">
-                      <span className="h-2 w-2 rounded-full bg-[#0070f3]" />
-                      <span className="font-mono tabular-nums">
-                        Generating {pendingSlots} · {(elapsedMs / 1000).toFixed(1)}s
-                      </span>
-                    </span>
+                    (() => {
+                      const doneCount = pendingImageSlots.filter(
+                        (s) => s.status === 'done'
+                      ).length;
+                      const runningCount = pendingImageSlots.filter(
+                        (s) => s.status === 'generating'
+                      ).length;
+                      const errorCount = pendingImageSlots.filter(
+                        (s) => s.status === 'error'
+                      ).length;
+                      return (
+                        <span className="inline-flex items-center gap-2 rounded-[6px] border border-[var(--border)] bg-[var(--card)] px-2.5 py-1 text-[12px] text-[var(--foreground)]">
+                          <span className="h-2 w-2 rounded-full bg-[#0070f3]" />
+                          <span className="font-mono tabular-nums">
+                            {doneCount}/{pendingSlots} ready
+                            {runningCount > 0 ? ` · ${runningCount} active` : ''}
+                            {errorCount > 0 ? ` · ${errorCount} failed` : ''} ·{' '}
+                            {(elapsedMs / 1000).toFixed(1)}s
+                          </span>
+                        </span>
+                      );
+                    })()
                   ) : currentRecord ? (
                     <span className="inline-flex items-center gap-2 rounded-[6px] border border-[var(--border)] bg-[var(--card)] px-2.5 py-1 text-[12px] text-[var(--foreground)]">
                       <span className="h-2 w-2 rounded-full bg-emerald-500" />
@@ -2590,8 +2713,19 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
 
               {/* Partial Failure Notice */}
               {generationErrors.length > 0 ? (
-                <div className="mb-4 rounded-[8px] border border-amber-500/30 bg-[var(--card)] px-3.5 py-2.5 text-[12px] text-[var(--muted-foreground)]">
-                  Partial batch warning: {generationErrors[0]}
+                <div className="mb-4 rounded-[8px] border border-amber-500/30 bg-[var(--card)] px-3.5 py-2.5 text-[12px] text-[var(--muted-foreground)] space-y-1">
+                  <p className="font-medium text-[var(--foreground)]">
+                    {generationErrors.length === 1
+                      ? `Partial batch warning: ${generationErrors[0]}`
+                      : `${generationErrors.length} images failed in batch:`}
+                  </p>
+                  {generationErrors.length > 1 ? (
+                    <ul className="list-disc pl-4 space-y-0.5 text-[11px]">
+                      {generationErrors.slice(0, 4).map((err, i) => (
+                        <li key={i}>{err}</li>
+                      ))}
+                    </ul>
+                  ) : null}
                 </div>
               ) : null}
 
@@ -2700,6 +2834,13 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
                   <div className="space-y-6">
                     {generatingShotSetPresets.map((presetId) => {
                       const presetSpec = getShotPreset(presetId);
+                      const groupSlots = pendingImageSlots.filter(
+                        (s) => s.shotId === presetId
+                      );
+                      const isGroupWhiteBg =
+                        presetSpec.isWhiteBackground ||
+                        (brief.useBackgroundColor &&
+                          brief.backgroundColor.toUpperCase() === '#FFFFFF');
                       return (
                         <div key={presetId} className="space-y-2.5">
                           <div className="flex items-center justify-between border-b border-[var(--border)] pb-1.5">
@@ -2713,33 +2854,80 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
                           <div
                             className={cn(
                               'grid gap-4',
-                              variations === 1
+                              groupSlots.length === 1
                                 ? 'grid-cols-1 max-w-xl'
                                 : 'grid-cols-1 md:grid-cols-2'
                             )}
                           >
-                            {Array.from({ length: variations }).map((_, idx) => (
-                              <div
-                                key={`${presetId}-${idx}`}
-                                className="overflow-hidden rounded-[12px] border border-[var(--border)] bg-[var(--card)]"
-                              >
-                                <div className="skeleton-shimmer relative aspect-square w-full bg-[var(--surface)] border-b border-[var(--border)] flex flex-col items-center justify-center gap-1.5 px-4 text-center">
-                                  <span className="font-mono text-[12px] tabular-nums text-[var(--foreground)]">
-                                    {presetSpec.name} · var {idx + 1} ·{' '}
-                                    {(elapsedMs / 1000).toFixed(1)}s
-                                  </span>
-                                  {showSlowModelHint ? (
-                                    <span className="text-[11px] text-[var(--muted-foreground)]">
-                                      This model can take over a minute
+                            {groupSlots.map((slot) =>
+                              slot.status === 'done' && slot.image ? (
+                                <ImageResultCard
+                                  key={slot.id}
+                                  image={slot.image}
+                                  productName={brief.name}
+                                  isWhiteBackgroundShot={isGroupWhiteBg}
+                                  showComplianceGuides={showComplianceGuides}
+                                  targetFillPercent={Math.round(
+                                    getMarketplaceAlignPreset(alignPresetId).targetFill * 100
+                                  )}
+                                  alignPresetLabel={
+                                    getMarketplaceAlignPreset(alignPresetId).shortLabel
+                                  }
+                                  isGenerating={isGenerating}
+                                  onOpenLightbox={() => {}}
+                                  onToggleFavorite={() => {}}
+                                  onDelete={() => {}}
+                                  onRemix={() => {}}
+                                  onRefine={() => {}}
+                                  onRegenerateFailedCheck={() => {}}
+                                  onUseAsReference={() =>
+                                    void handleUseAsReference(slot.image!.dataUrl)
+                                  }
+                                />
+                              ) : slot.status === 'error' ? (
+                                <div
+                                  key={slot.id}
+                                  className="overflow-hidden rounded-[12px] border border-amber-500/40 bg-[var(--card)]"
+                                >
+                                  <div className="aspect-square w-full bg-[var(--surface)] border-b border-[var(--border)] flex flex-col items-center justify-center gap-2 px-5 text-center">
+                                    <AlertTriangle className="h-5 w-5 text-amber-500" />
+                                    <span className="text-[12px] font-medium text-[var(--foreground)]">
+                                      {presetSpec.name} · var {slot.variationIndex + 1} failed
                                     </span>
-                                  ) : null}
+                                    <span className="text-[11px] text-[var(--muted-foreground)] line-clamp-3">
+                                      {slot.error || 'Generation error'}
+                                    </span>
+                                  </div>
                                 </div>
-                                <div className="p-3.5 space-y-2.5">
-                                  <div className="h-4 w-2/3 rounded-[4px] bg-[var(--surface)]" />
-                                  <div className="h-3 w-1/3 rounded-[4px] bg-[var(--surface)]" />
+                              ) : (
+                                <div
+                                  key={slot.id}
+                                  className="overflow-hidden rounded-[12px] border border-[var(--border)] bg-[var(--card)]"
+                                >
+                                  <div
+                                    className={cn(
+                                      'relative aspect-square w-full bg-[var(--surface)] border-b border-[var(--border)] flex flex-col items-center justify-center gap-1.5 px-4 text-center',
+                                      slot.status === 'generating' && 'skeleton-shimmer'
+                                    )}
+                                  >
+                                    <span className="font-mono text-[12px] tabular-nums text-[var(--foreground)]">
+                                      {slot.status === 'queued'
+                                        ? `${presetSpec.name} · var ${slot.variationIndex + 1} · Queued`
+                                        : `${presetSpec.name} · var ${slot.variationIndex + 1} · ${(elapsedMs / 1000).toFixed(1)}s`}
+                                    </span>
+                                    {showSlowModelHint && slot.status === 'generating' ? (
+                                      <span className="text-[11px] text-[var(--muted-foreground)]">
+                                        This model can take over a minute
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                  <div className="p-3.5 space-y-2.5">
+                                    <div className="h-4 w-2/3 rounded-[4px] bg-[var(--surface)]" />
+                                    <div className="h-3 w-1/3 rounded-[4px] bg-[var(--surface)]" />
+                                  </div>
                                 </div>
-                              </div>
-                            ))}
+                              )
+                            )}
                           </div>
                         </div>
                       );
@@ -2749,32 +2937,84 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
                   <div
                     className={cn(
                       'grid gap-4',
-                      pendingSlots === 1
+                      pendingImageSlots.length === 1
                         ? 'grid-cols-1 max-w-xl'
                         : 'grid-cols-1 md:grid-cols-2'
                     )}
                   >
-                    {Array.from({ length: pendingSlots }).map((_, idx) => (
-                      <div
-                        key={idx}
-                        className="overflow-hidden rounded-[12px] border border-[var(--border)] bg-[var(--card)]"
-                      >
-                        <div className="skeleton-shimmer relative aspect-square w-full bg-[var(--surface)] border-b border-[var(--border)] flex flex-col items-center justify-center gap-1.5 px-4 text-center">
-                          <span className="font-mono text-[12px] tabular-nums text-[var(--foreground)]">
-                            Rendering variation {idx + 1} · {(elapsedMs / 1000).toFixed(1)}s
-                          </span>
-                          {showSlowModelHint ? (
-                            <span className="text-[11px] text-[var(--muted-foreground)]">
-                              This model can take over a minute
+                    {pendingImageSlots.map((slot) =>
+                      slot.status === 'done' && slot.image ? (
+                        <ImageResultCard
+                          key={slot.id}
+                          image={slot.image}
+                          productName={brief.name}
+                          isWhiteBackgroundShot={
+                            selectedShot.isWhiteBackground ||
+                            (brief.useBackgroundColor &&
+                              brief.backgroundColor.toUpperCase() === '#FFFFFF')
+                          }
+                          showComplianceGuides={showComplianceGuides}
+                          targetFillPercent={Math.round(
+                            getMarketplaceAlignPreset(alignPresetId).targetFill * 100
+                          )}
+                          alignPresetLabel={
+                            getMarketplaceAlignPreset(alignPresetId).shortLabel
+                          }
+                          isGenerating={isGenerating}
+                          onOpenLightbox={() => {}}
+                          onToggleFavorite={() => {}}
+                          onDelete={() => {}}
+                          onRemix={() => {}}
+                          onRefine={() => {}}
+                          onRegenerateFailedCheck={() => {}}
+                          onUseAsReference={() =>
+                            void handleUseAsReference(slot.image!.dataUrl)
+                          }
+                        />
+                      ) : slot.status === 'error' ? (
+                        <div
+                          key={slot.id}
+                          className="overflow-hidden rounded-[12px] border border-amber-500/40 bg-[var(--card)]"
+                        >
+                          <div className="aspect-square w-full bg-[var(--surface)] border-b border-[var(--border)] flex flex-col items-center justify-center gap-2 px-5 text-center">
+                            <AlertTriangle className="h-5 w-5 text-amber-500" />
+                            <span className="text-[12px] font-medium text-[var(--foreground)]">
+                              Variation {slot.variationIndex + 1} failed
                             </span>
-                          ) : null}
+                            <span className="text-[11px] text-[var(--muted-foreground)] line-clamp-3">
+                              {slot.error || 'Generation error'}
+                            </span>
+                          </div>
                         </div>
-                        <div className="p-3.5 space-y-2.5">
-                          <div className="h-4 w-2/3 rounded-[4px] bg-[var(--surface)]" />
-                          <div className="h-3 w-1/3 rounded-[4px] bg-[var(--surface)]" />
+                      ) : (
+                        <div
+                          key={slot.id}
+                          className="overflow-hidden rounded-[12px] border border-[var(--border)] bg-[var(--card)]"
+                        >
+                          <div
+                            className={cn(
+                              'relative aspect-square w-full bg-[var(--surface)] border-b border-[var(--border)] flex flex-col items-center justify-center gap-1.5 px-4 text-center',
+                              slot.status === 'generating' && 'skeleton-shimmer'
+                            )}
+                          >
+                            <span className="font-mono text-[12px] tabular-nums text-[var(--foreground)]">
+                              {slot.status === 'queued'
+                                ? `Variation ${slot.variationIndex + 1} · Queued`
+                                : `Rendering variation ${slot.variationIndex + 1} · ${(elapsedMs / 1000).toFixed(1)}s`}
+                            </span>
+                            {showSlowModelHint && slot.status === 'generating' ? (
+                              <span className="text-[11px] text-[var(--muted-foreground)]">
+                                This model can take over a minute
+                              </span>
+                            ) : null}
+                          </div>
+                          <div className="p-3.5 space-y-2.5">
+                            <div className="h-4 w-2/3 rounded-[4px] bg-[var(--surface)]" />
+                            <div className="h-3 w-1/3 rounded-[4px] bg-[var(--surface)]" />
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      )
+                    )}
                   </div>
                 )
               ) : currentShotSet && currentShotSet.length > 0 ? (
@@ -2980,7 +3220,12 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
                   className="flex-1"
                 >
                   {isGenerating
-                    ? `Generating ${pendingSlots} (${(elapsedMs / 1000).toFixed(0)}s)...`
+                    ? (() => {
+                        const doneCount = pendingImageSlots.filter(
+                          (s) => s.status === 'done' || s.status === 'error'
+                        ).length;
+                        return `Generating ${doneCount}/${pendingSlots} (${(elapsedMs / 1000).toFixed(0)}s)...`;
+                      })()
                     : isShotSetActive
                       ? `Generate shot set (${totalPlannedShots} shots)`
                       : `Generate ${variations} ${variations === 1 ? 'shot' : 'shots'}`}
