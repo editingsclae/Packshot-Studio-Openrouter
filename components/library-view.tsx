@@ -8,6 +8,7 @@ import {
   Download,
   FileArchive,
   Heart,
+  ImagePlus,
   Maximize2,
   Search,
   Shuffle,
@@ -53,6 +54,7 @@ interface LibraryViewProps {
   onClearLibrary: () => void;
   onOpenLightbox: (record: GenerationRecord, imageIndex: number) => void;
   onGoToGenerate: () => void;
+  onUseAsReference?: (image: GeneratedImageItem) => void;
 }
 
 function makeItemKey(recordId: string, imageId: string) {
@@ -77,6 +79,7 @@ export function LibraryView({
   onClearLibrary,
   onOpenLightbox,
   onGoToGenerate,
+  onUseAsReference,
 }: LibraryViewProps) {
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
@@ -587,6 +590,17 @@ export function LibraryView({
                       >
                         <Copy className="h-3.5 w-3.5" />
                       </button>
+                      {onUseAsReference ? (
+                        <button
+                          type="button"
+                          onClick={() => onUseAsReference(image)}
+                          title="Use as reference in Photo mode"
+                          aria-label="Use as reference"
+                          className="inline-flex h-7 w-7 items-center justify-center rounded-[6px] border border-[var(--border)] text-[var(--muted-foreground)] hover:border-[var(--border-hover)] hover:text-[var(--foreground)] cursor-pointer"
+                        >
+                          <ImagePlus className="h-3.5 w-3.5" />
+                        </button>
+                      ) : null}
                       <button
                         type="button"
                         onClick={() => {

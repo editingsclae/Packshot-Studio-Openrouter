@@ -6,8 +6,10 @@ import {
   ChevronLeft,
   ChevronRight,
   Copy,
+  Crop,
   Download,
   Heart,
+  ImagePlus,
   Info,
   Shuffle,
   XCircle,
@@ -37,6 +39,8 @@ interface LightboxModalProps {
   isWhiteBackgroundShot: boolean;
   onToggleFavorite: (imageId: string) => void;
   onRemix: () => void;
+  onOpenAlignModal?: (imageId: string) => void;
+  onUseAsReference?: (image: GeneratedImageItem) => void;
 }
 
 export function LightboxModal({
@@ -53,6 +57,8 @@ export function LightboxModal({
   isWhiteBackgroundShot,
   onToggleFavorite,
   onRemix,
+  onOpenAlignModal,
+  onUseAsReference,
 }: LightboxModalProps) {
   const image = images[activeIndex];
 
@@ -283,6 +289,36 @@ export function LightboxModal({
                 Remix
               </Button>
             </div>
+
+            {!isSvg && onOpenAlignModal ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                className="w-full"
+                onClick={() => {
+                  onOpenChange(false);
+                  onOpenAlignModal(image.id);
+                }}
+              >
+                <Crop className="h-3.5 w-3.5" />
+                <span>Auto-Crop &amp; Center Alignment</span>
+              </Button>
+            ) : null}
+
+            {onUseAsReference ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                className="w-full"
+                onClick={() => {
+                  onOpenChange(false);
+                  onUseAsReference(image);
+                }}
+              >
+                <ImagePlus className="h-3.5 w-3.5" />
+                <span>Use as reference</span>
+              </Button>
+            ) : null}
           </div>
         </div>
       </div>

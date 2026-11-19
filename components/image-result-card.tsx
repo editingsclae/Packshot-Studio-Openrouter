@@ -4,12 +4,16 @@ import React, { useState } from 'react';
 import {
   CheckCircle2,
   Copy,
+  Crop,
   Download,
   Heart,
+  ImagePlus,
   Info,
   Maximize2,
   RefreshCw,
+  RotateCcw,
   Shuffle,
+  SlidersHorizontal,
   Trash2,
   XCircle,
 } from 'lucide-react';
@@ -26,12 +30,20 @@ interface ImageResultCardProps {
   image: GeneratedImageItem;
   productName: string;
   isWhiteBackgroundShot: boolean;
+  showComplianceGuides?: boolean;
+  targetFillPercent?: number;
+  alignPresetLabel?: string;
+  isAligning?: boolean;
   onOpenLightbox: () => void;
   onToggleFavorite: () => void;
   onDelete: () => void;
   onRemix: () => void;
   onRefine: (chipId: string) => void;
   onRegenerateFailedCheck: () => void;
+  onAutoCenter?: () => void;
+  onOpenAlignModal?: () => void;
+  onRevertAlignment?: () => void;
+  onUseAsReference?: () => void;
   isGenerating: boolean;
 }
 
@@ -39,12 +51,20 @@ export function ImageResultCard({
   image,
   productName,
   isWhiteBackgroundShot,
+  showComplianceGuides = false,
+  targetFillPercent = 85,
+  alignPresetLabel = 'Amazon 85%',
+  isAligning = false,
   onOpenLightbox,
   onToggleFavorite,
   onDelete,
   onRemix,
   onRefine,
   onRegenerateFailedCheck,
+  onAutoCenter,
+  onOpenAlignModal,
+  onRevertAlignment,
+  onUseAsReference,
   isGenerating,
 }: ImageResultCardProps) {
   const [downloadingFormat, setDownloadingFormat] = useState<
@@ -94,6 +114,7 @@ export function ImageResultCard({
 
   const check = image.packshotCheck;
   const checkFailed = !isSvg && isWhiteBackgroundShot && check && !check.overallPass;
+  const safeMarginPct = Math.max(3, (100 - targetFillPercent) / 2);
 
   const downloadFormats: ('svg' | 'png' | 'webp' | 'jpeg')[] = isSvg
     ? ['svg', 'png', 'webp', 'jpeg']
@@ -118,8 +139,51 @@ export function ImageResultCard({
           />
         </button>
 
+        {/* Optional Marketplace Compliance Safe-Zone & Center Crosshairs */}
+        {showComplianceGuides && !isSvg ? (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-0"
+          >
+            <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 border-l border-dashed border-[#0070f3]/65" />
+            <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 border-t border-dashed border-[#0070f3]/65" />
+            <div
+              className="absolute rounded-[2px] border border-dashed border-emerald-500/80"
+              style={{
+                top: `${safeMarginPct}%`,
+                bottom: `${safeMarginPct}%`,
+                left: `${safeMarginPct}%`,
+                right: `${safeMarginPct}%`,
+              }}
+            >
+              <span className="absolute -top-4 left-0 rounded-[3px] bg-emerald-500/90 px-1 py-0.5 font-mono text-[9px] font-medium text-white">
+                {targetFillPercent}% SAFE
+              </span>
+            </div>
+          </div>
+        ) : null}
+
+        {/* Top-left Aligned Badge */}
+        {image.alignedLabel ? (
+          <div className="pointer-events-none absolute left-2.5 top-2.5 inline-flex items-center gap-1 rounded-[5px] border border-[var(--border)] bg-[var(--card)]/90 px-2 py-0.5 font-mono text-[10px] font-medium text-[var(--foreground)] backdrop-blur-sm">
+            <Crop className="h-2.5 w-2.5 text-emerald-500" />
+            <span>{image.alignedLabel}</span>
+          </div>
+        ) : null}
+
         {/* Top-right Quick Overlay Actions */}
         <div className="absolute right-2.5 top-2.5 flex items-center gap-1.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100 transition-opacity duration-150">
+          {!isSvg && onOpenAlignModal ? (
+            <button
+              type="button"
+              onClick={onOpenAlignModal}
+              aria-label="Open auto-crop and centering editor"
+              title="Auto-crop & center settings"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-[6px] border border-[var(--border)] bg-[var(--card)]/90 text-[var(--foreground)] backdrop-blur-sm transition-colors hover:border-[var(--border-hover)] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3]"
+            >
+              <SlidersHorizontal className="h-3.5 w-3.5" />
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={onToggleFavorite}
@@ -193,16 +257,103 @@ export function ImageResultCard({
             </div>
 
             {checkFailed ? (
-              <button
-                type="button"
-                disabled={isGenerating}
-                onClick={onRegenerateFailedCheck}
-                className="inline-flex h-7 items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-2.5 text-[11px] font-medium text-[var(--foreground)] hover:border-[var(--border-hover)] disabled:opacity-40 cursor-pointer whitespace-nowrap shrink-0"
-              >
-                <RefreshCw className="h-3 w-3" />
-                <span>Regenerate</span>
-              </button>
+              <div className="flex items-center gap-1.5">
+                {onAutoCenter ? (
+                  <button
+                    type="button"
+                    disabled={isGenerating || isAligning}
+                    onClick={onAutoCenter}
+                    title={`Auto-crop and center to ${alignPresetLabel}`}
+                    className="inline-flex h-7 items-center gap-1.5 rounded-[6px] border border-[var(--foreground)] bg-[var(--foreground)] px-2.5 text-[11px] font-medium text-[var(--background)] hover:opacity-90 disabled:opacity-40 cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    <Crop className="h-3 w-3" />
+                    <span>{isAligning ? 'Aligning...' : 'Auto-Center'}</span>
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  disabled={isGenerating}
+                  onClick={onRegenerateFailedCheck}
+                  className="inline-flex h-7 items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-2.5 text-[11px] font-medium text-[var(--foreground)] hover:border-[var(--border-hover)] disabled:opacity-40 cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  <RefreshCw className="h-3 w-3" />
+                  <span>Regenerate</span>
+                </button>
+              </div>
             ) : null}
+          </div>
+        ) : null}
+
+        {/* Marketplace Auto-Crop & Reference Utility Row */}
+        {(!isSvg && (onAutoCenter || onOpenAlignModal)) || onUseAsReference ? (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-[8px] border border-[var(--border)] bg-[var(--surface)]/70 px-2.5 py-1.5">
+            <span className="text-[11px] text-[var(--muted-foreground)]">
+              {!isSvg && image.alignedLabel ? (
+                <>
+                  Aligned:{' '}
+                  <span className="font-mono text-[var(--foreground)]">
+                    {image.alignedLabel}
+                  </span>
+                </>
+              ) : isSvg ? (
+                'Shot utilities'
+              ) : (
+                'Marketplace alignment'
+              )}
+            </span>
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              {!isSvg && onAutoCenter ? (
+                <button
+                  type="button"
+                  disabled={isGenerating || isAligning}
+                  onClick={onAutoCenter}
+                  className="inline-flex h-6 items-center gap-1 rounded-[5px] border border-[var(--border)] bg-[var(--card)] px-2 text-[11px] font-medium text-[var(--foreground)] transition-colors hover:border-[var(--border-hover)] disabled:opacity-40 cursor-pointer whitespace-nowrap"
+                >
+                  <Crop className="h-3 w-3" />
+                  <span>
+                    {isAligning ? 'Centering...' : `Center (${alignPresetLabel})`}
+                  </span>
+                </button>
+              ) : null}
+
+              {!isSvg && onOpenAlignModal ? (
+                <button
+                  type="button"
+                  disabled={isGenerating || isAligning}
+                  onClick={onOpenAlignModal}
+                  className="inline-flex h-6 items-center gap-1 rounded-[5px] border border-[var(--border)] bg-[var(--card)] px-2 text-[11px] text-[var(--muted-foreground)] transition-colors hover:border-[var(--border-hover)] hover:text-[var(--foreground)] disabled:opacity-40 cursor-pointer whitespace-nowrap"
+                >
+                  <SlidersHorizontal className="h-3 w-3" />
+                  <span>Crop &amp; fit</span>
+                </button>
+              ) : null}
+
+              {!isSvg && image.originalDataUrl && onRevertAlignment ? (
+                <button
+                  type="button"
+                  disabled={isAligning}
+                  onClick={onRevertAlignment}
+                  title="Revert to original uncropped image"
+                  aria-label="Revert alignment to original"
+                  className="inline-flex h-6 items-center gap-1 rounded-[5px] border border-[var(--border)] bg-[var(--card)] px-1.5 text-[11px] text-[var(--muted-foreground)] transition-colors hover:border-[var(--border-hover)] hover:text-[var(--foreground)] disabled:opacity-40 cursor-pointer"
+                >
+                  <RotateCcw className="h-3 w-3" />
+                </button>
+              ) : null}
+
+              {onUseAsReference ? (
+                <button
+                  type="button"
+                  disabled={isGenerating}
+                  onClick={onUseAsReference}
+                  className="inline-flex h-6 items-center gap-1 rounded-[5px] border border-[var(--border)] bg-[var(--card)] px-2 text-[11px] font-medium text-[var(--foreground)] transition-colors hover:border-[var(--border-hover)] disabled:opacity-40 cursor-pointer whitespace-nowrap"
+                >
+                  <ImagePlus className="h-3 w-3" />
+                  <span>Use as reference</span>
+                </button>
+              ) : null}
+            </div>
           </div>
         ) : null}
 

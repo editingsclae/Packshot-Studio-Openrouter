@@ -4,7 +4,10 @@ import React, { useRef } from 'react';
 import { ImagePlus, Plus, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { PRODUCT_CATEGORIES, type ProductCategoryId } from '@/lib/presets';
-import type { ProductBrief } from '@/lib/prompt-engine';
+import {
+  getDetailsToLockPlaceholder,
+  type ProductBrief,
+} from '@/lib/prompt-engine';
 import type { NormalizedImageModel } from '@/lib/models';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -28,6 +31,7 @@ interface BriefFormProps {
   inputReferences: string[];
   onInputReferencesChange: (refs: string[]) => void;
   isWhiteBackgroundPreset: boolean;
+  variations: number;
 }
 
 export function BriefForm({
@@ -39,6 +43,7 @@ export function BriefForm({
   inputReferences,
   onInputReferencesChange,
   isWhiteBackgroundPreset,
+  variations,
 }: BriefFormProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -375,6 +380,23 @@ export function BriefForm({
           className="min-h-[68px] resize-y"
           maxLength={280}
         />
+      </div>
+
+      {/* Details to Lock (Exact) */}
+      <div className="space-y-1.5">
+        <Label htmlFor="details-to-lock">Details to lock (exact)</Label>
+        <Input
+          id="details-to-lock"
+          value={brief.detailsToLock ?? ''}
+          onChange={(e) => updateField('detailsToLock', e.target.value)}
+          placeholder={getDetailsToLockPlaceholder(brief.category)}
+          maxLength={240}
+        />
+        {variations > 1 && !(brief.detailsToLock ?? '').trim() ? (
+          <p className="text-[11px] leading-snug text-amber-500">
+            Generating {variations} variations with this empty — color placement, trim, or secondary details may differ across shots.
+          </p>
+        ) : null}
       </div>
 
       {/* Exact On-Product Text (max 2 short strings) */}

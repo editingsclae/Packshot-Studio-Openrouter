@@ -12,6 +12,8 @@ import type { PackshotCheckResult } from './packshot-check';
 export interface GeneratedImageItem {
   id: string;
   dataUrl: string;
+  originalDataUrl?: string;
+  alignedLabel?: string;
   mediaType: string;
   seed?: number;
   cost: number | null;

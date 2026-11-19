@@ -922,7 +922,7 @@ export async function enhancePromptWithAI(deterministicPrompt: string): Promise<
     'Rewrite the provided deterministic product photography prompt into richer, natural, tactile photographic language following the exact same structure:',
     '1) subject (one sentence, product first) > 2) materials, finish, colors > 3) composition > 4) camera and lens language > 5) lighting > 6) background > 7) realism cues > 8) constraints.',
     'STRICT RULES:',
-    '- Preserve EVERY factual product detail, material, finish, and color hex/tone.',
+    '- Preserve EVERY factual product detail, material, finish, and natural color description without adding hex codes.',
     '- NEVER invent brand names, logos, props, or extra text not present in the input.',
     '- Keep any quoted exact on-product text string character-for-character identical.',
     '- Keep all exclusion constraints ("Single product only. No people...", "No watermark...", etc.).',

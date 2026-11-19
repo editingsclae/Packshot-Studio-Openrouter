@@ -10,10 +10,11 @@ export interface ProductBrief {
   name: string;
   category: ProductCategoryId;
   materialFinish: string;
-  colors: string[]; // up to 5 hex colors
+  colors: string[]; // up to 5 hex colors (used for rgb_colors param; prompt gets color names only)
   useBackgroundColor: boolean;
   backgroundColor: string;
   keyFeatures: string;
+  detailsToLock?: string;
   onProductTexts: string[]; // up to 2 short strings
 }
 
@@ -29,14 +30,47 @@ export interface SampleBriefPreset {
   shotId: ShotPresetId;
 }
 
+export function getDetailsToLockPlaceholder(category: ProductCategoryId): string {
+  switch (category) {
+    case 'watches-accessories':
+      return 'e.g. dial color, strap color and material, case finish, hand accents';
+    case 'apparel':
+      return 'e.g. collar cut, fabric weave, stitch thread color, button finish';
+    case 'footwear':
+      return 'e.g. upper panel colors, midsole profile, lace hardware, outsole lug color';
+    case 'jewelry':
+      return 'e.g. precious metal tone, stone cut & tint, prong count, clasp finish';
+    case 'beauty-skincare':
+      return 'e.g. bottle glass tint, pump/collar finish, label placement, serum color';
+    case 'electronics':
+      return 'e.g. chassis finish, bezel chamfer, port alignment, dial/button accents';
+    case 'home-furniture':
+      return 'e.g. wood species tone, upholstery weave, handle/knob material, silhouette';
+    case 'food-beverage':
+      return 'e.g. glaze color, garnish placement, vessel texture, liquid clarity';
+    case 'bags-accessories':
+      return 'e.g. leather grain, hardware plating, stitch color, strap buckle style';
+    case 'bottles-packaging':
+      return 'e.g. carton fold edges, cap foil color, label layout, bottle glass tone';
+    case 'toys':
+      return 'e.g. painted color zones, seam placement, matte polymer finish, proportions';
+    default:
+      return 'e.g. exact finish zones, hardware tone, secondary color placement';
+  }
+}
+
 export const DEFAULT_BRIEF: ProductBrief = {
-  name: 'Matte Ceramic Pour-Over Kettle',
+  name: 'Matte Black Stainless Steel Pour-Over Kettle',
   category: 'home-furniture',
-  materialFinish: 'matte powder-coated stainless steel body with oiled walnut handle and lid knob',
+  materialFinish:
+    'matte black powder-coated stainless steel body with oiled walnut wood handle and lid knob',
   colors: ['#1C1C1E', '#7A5438'],
   useBackgroundColor: false,
   backgroundColor: '#FFFFFF',
-  keyFeatures: 'precision gooseneck spout, balanced ergonomic handle, minimalist cylindrical silhouette',
+  keyFeatures:
+    'precision gooseneck spout, balanced ergonomic walnut handle, minimalist cylindrical body',
+  detailsToLock:
+    'matte black steel body, oiled walnut wood handle and lid knob, gooseneck spout curve',
   onProductTexts: [],
 };
 
@@ -54,11 +88,15 @@ export const SAMPLE_BRIEFS: SampleBriefPreset[] = [
     brief: {
       name: 'Amber Glass Facial Serum Dropper Bottle',
       category: 'beauty-skincare',
-      materialFinish: 'uv-protective amber apothecary glass with matte black rubber bulb and brushed brass collar',
+      materialFinish:
+        'uv-protective amber apothecary glass with matte black rubber dropper bulb, brushed brass collar, and warm alabaster paper label',
       colors: ['#9B4F1B', '#18181B', '#C5A059'],
       useBackgroundColor: true,
       backgroundColor: '#EAE6DF',
-      keyFeatures: '30ml cylindrical bottle, glass pipette visible through amber glass, minimal matte cream paper label',
+      keyFeatures:
+        '30ml cylindrical glass bottle, glass pipette visible inside, minimal wraparound matte paper label',
+      detailsToLock:
+        'amber glass bottle tint, brushed brass collar, matte black rubber bulb, crisp centered label',
       onProductTexts: ['SOLIS 15%'],
     },
   },
@@ -69,11 +107,15 @@ export const SAMPLE_BRIEFS: SampleBriefPreset[] = [
     brief: {
       name: 'Low-Top Technical Trail Running Sneaker',
       category: 'footwear',
-      materialFinish: 'breathable engineered ripstop mesh, matte suede overlays, sculpted EVA foam midsole',
+      materialFinish:
+        'light warm gray engineered ripstop mesh upper, forest green matte suede overlays, burnt orange heel accent, sculpted off-white EVA midsole',
       colors: ['#E5E2DC', '#2E3A34', '#D96B27'],
       useBackgroundColor: false,
       backgroundColor: '#FFFFFF',
-      keyFeatures: 'lugged Vibram-style rubber outsole, cord-lock speed lacing, reinforced heel pull tab',
+      keyFeatures:
+        'lugged trail rubber outsole, cord-lock speed lacing, reinforced heel pull tab',
+      detailsToLock:
+        'light warm gray mesh upper, forest green suede overlays, burnt orange heel tab, lugged outsole',
       onProductTexts: [],
     },
   },
@@ -83,83 +125,108 @@ export const SAMPLE_BRIEFS: SampleBriefPreset[] = [
     shotId: 'macro-detail',
     brief: {
       name: 'Brushed Grade-5 Titanium Field Chronograph',
-      category: 'jewelry',
-      materialFinish: 'satin-brushed titanium case with chamfered bezel, anti-reflective sapphire crystal, matte cordura strap',
+      category: 'watches-accessories',
+      materialFinish:
+        'satin-brushed titanium gray case with chamfered bezel, obsidian black matte dial, anti-reflective sapphire glass, obsidian black cordura strap, burnt orange chrono hand',
       colors: ['#8A8D91', '#14171A', '#D4622A'],
       useBackgroundColor: false,
       backgroundColor: '#121316',
-      keyFeatures: 'recessed sub-dials, knurled screw-down crown, crisp luminous baton indices',
+      keyFeatures:
+        'recessed twin sub-dials, knurled screw-down crown, crisp luminous baton indices',
+      detailsToLock:
+        'obsidian black dial, burnt orange chronograph hand, satin-brushed titanium case finish, black cordura strap and stitching',
       onProductTexts: ['AUTOMATIC'],
     },
   },
 ];
 
+const NAMED_STUDIO_COLORS: ReadonlyArray<
+  readonly [name: string, rgb: readonly [number, number, number]]
+> = [
+  ['pure white', [255, 255, 255]],
+  ['off-white', [246, 245, 240]],
+  ['warm alabaster', [234, 230, 223]],
+  ['light warm gray', [229, 226, 220]],
+  ['cream ivory', [244, 236, 216]],
+  ['sandstone beige', [214, 198, 174]],
+  ['brushed silver', [192, 195, 200]],
+  ['titanium gray', [138, 141, 145]],
+  ['medium slate gray', [106, 112, 118]],
+  ['charcoal gray', [54, 57, 62]],
+  ['matte black', [28, 28, 30]],
+  ['obsidian black', [20, 23, 26]],
+  ['jet black', [12, 13, 16]],
+  ['walnut brown', [122, 84, 56]],
+  ['espresso brown', [74, 48, 34]],
+  ['amber brown', [155, 79, 27]],
+  ['cognac tan', [182, 114, 62]],
+  ['brushed brass', [197, 160, 89]],
+  ['champagne gold', [218, 188, 124]],
+  ['burnt orange', [215, 102, 40]],
+  ['terracotta', [198, 92, 58]],
+  ['crimson red', [184, 34, 38]],
+  ['burgundy', [118, 28, 44]],
+  ['dusty rose', [194, 126, 134]],
+  ['ochre yellow', [214, 168, 46]],
+  ['olive green', [92, 104, 64]],
+  ['forest green', [46, 58, 52]],
+  ['sage green', [140, 158, 138]],
+  ['emerald green', [24, 118, 82]],
+  ['deep teal', [24, 116, 122]],
+  ['slate blue', [88, 114, 142]],
+  ['navy blue', [28, 44, 76]],
+  ['cobalt blue', [40, 96, 214]],
+  ['deep indigo', [54, 48, 126]],
+  ['plum purple', [104, 48, 92]],
+];
+
 /**
- * Converts a #RRGGBB hex string into a descriptive natural color name + hex
- * so image models reliably render accurate product & background colors even
- * when rgb_colors image_config is unsupported.
+ * Converts a #RRGGBB hex string into a natural color name via nearest perceptual RGB lookup
+ * (no hex codes returned in prompt text).
  */
 export function describeHexColor(hex: string): string {
   const cleaned = hex.trim().replace('#', '');
   if (!/^[0-9a-fA-F]{6}$/.test(cleaned)) {
-    return hex;
+    return hex.replace(/#[0-9a-fA-F]{3,8}/g, '').trim() || 'neutral tone';
   }
 
   const r = parseInt(cleaned.slice(0, 2), 16);
   const g = parseInt(cleaned.slice(2, 4), 16);
   const b = parseInt(cleaned.slice(4, 6), 16);
 
-  const max = Math.max(r, g, b) / 255;
-  const min = Math.min(r, g, b) / 255;
-  const l = (max + min) / 2;
-  const d = max - min;
+  let bestName = 'neutral gray';
+  let bestDist = Number.POSITIVE_INFINITY;
 
-  if (d < 0.08) {
-    if (l > 0.96) return `pure white (#${cleaned.toUpperCase()})`;
-    if (l > 0.82) return `off-white (#${cleaned.toUpperCase()})`;
-    if (l > 0.62) return `light neutral gray (#${cleaned.toUpperCase()})`;
-    if (l > 0.36) return `medium slate gray (#${cleaned.toUpperCase()})`;
-    if (l > 0.14) return `charcoal (#${cleaned.toUpperCase()})`;
-    return `deep matte black (#${cleaned.toUpperCase()})`;
+  for (const [name, [cr, cg, cb]] of NAMED_STUDIO_COLORS) {
+    const rMean = (r + cr) / 2;
+    const dr = r - cr;
+    const dg = g - cg;
+    const db = b - cb;
+    const dist =
+      (2 + rMean / 256) * dr * dr +
+      4 * dg * dg +
+      (2 + (255 - rMean) / 256) * db * db;
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestName = name;
+    }
   }
 
-  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-  let h = 0;
-  const rn = r / 255;
-  const gn = g / 255;
-  const bn = b / 255;
-  if (max === rn) h = (gn - bn) / d + (gn < bn ? 6 : 0);
-  else if (max === gn) h = (bn - rn) / d + 2;
-  else h = (rn - gn) / d + 4;
-  h *= 60;
-
-  let hueName = 'neutral';
-  if (h < 15 || h >= 345) hueName = 'crimson red';
-  else if (h < 35) hueName = 'burnt orange';
-  else if (h < 52) hueName = 'warm amber';
-  else if (h < 70) hueName = 'ochre yellow';
-  else if (h < 150) hueName = 'forest green';
-  else if (h < 185) hueName = 'teal';
-  else if (h < 235) hueName = 'cobalt blue';
-  else if (h < 275) hueName = 'indigo';
-  else if (h < 320) hueName = 'plum';
-  else hueName = 'rose';
-
-  const tone = l < 0.28 ? 'deep ' : l > 0.72 ? 'pale ' : s < 0.32 ? 'muted ' : '';
-  return `${tone}${hueName} (#${cleaned.toUpperCase()})`;
+  return bestName;
 }
 
 /**
  * Deterministic Realism Engine prompt builder.
  * Enforces exact anatomy order:
  * 1. Subject (one sentence, product first)
- * 2. Materials, finish, colors
- * 3. Composition
- * 4. Camera and lens language
- * 5. Lighting
- * 6. Background
- * 7. Realism cues (including Category Realism Module)
- * 8. Constraints (short declarative sentences)
+ * 2. Exact details to lock (if provided)
+ * 3. Materials, finish, natural color names (no hex codes)
+ * 4. Composition
+ * 5. Camera and lens language
+ * 6. Lighting
+ * 7. Background
+ * 8. Realism cues (including Category Realism Module)
+ * 9. Constraints (short declarative sentences)
  */
 export function buildPrompt(
   brief: ProductBrief,
@@ -171,55 +238,71 @@ export function buildPrompt(
 
   const productName = brief.name.trim() || 'Commercial ecommerce product';
   const features = brief.keyFeatures.trim();
+  const lockedDetails = (brief.detailsToLock ?? '').trim();
 
   // 1. Subject (one sentence, product first)
   const subjectSentence = features
     ? `Commercial product photograph of ${productName} featuring ${features}.`
     : `Commercial product photograph of ${productName}.`;
 
-  // 2. Materials, finish, colors
-  const colorList = brief.colors
-    .filter((c) => /^#[0-9a-fA-F]{6}$/.test(c.trim()))
-    .slice(0, 5)
-    .map(describeHexColor);
+  // 2. Exact details to lock (placed right after subject)
+  const exactDetailsSentence = lockedDetails
+    ? `Exact details: ${lockedDetails}.`
+    : '';
+
+  // 3. Materials, finish, natural color names (no hex codes in prompt text)
+  const colorList = Array.from(
+    new Set(
+      brief.colors
+        .filter((c) => /^#[0-9a-fA-F]{6}$/.test(c.trim()))
+        .slice(0, 5)
+        .map(describeHexColor)
+    )
+  );
 
   const materialParts: string[] = [];
   if (brief.materialFinish.trim()) {
     materialParts.push(`Crafted in ${brief.materialFinish.trim()}`);
   } else {
-    materialParts.push(`Crafted in authentic commercial ${category.label.toLowerCase()} materials`);
+    materialParts.push(
+      `Crafted in authentic commercial ${category.label.toLowerCase()} materials`
+    );
   }
   if (colorList.length > 0) {
     materialParts.push(`with a colorway of ${colorList.join(', ')}`);
   }
   const materialsSentence = `${materialParts.join(' ')}.`;
 
-  // 3. Composition
+  // 4. Composition
   const compositionSentence = `${shot.composition}.`;
 
-  // 4. Camera & lens language
+  // 5. Camera & lens language
   const cameraSentence = `Shot on ${shot.camera}.`;
 
-  // 5. Lighting
+  // 6. Lighting
   const lightingSentence = `${shot.lighting}.`;
 
-  // 6. Background
+  // 7. Background (natural color names only, no #HEX)
+  const cleanShotBackground = shot.background.replace(/\s*\(#?[0-9a-fA-F]{6}\)/g, '');
   let backgroundSentence = '';
   if (shot.id === 'marketplace-packshot') {
-    backgroundSentence = `${shot.background}.`;
-  } else if (brief.useBackgroundColor && /^#[0-9a-fA-F]{6}$/.test(brief.backgroundColor.trim())) {
+    backgroundSentence = `${cleanShotBackground}.`;
+  } else if (
+    brief.useBackgroundColor &&
+    /^#[0-9a-fA-F]{6}$/.test(brief.backgroundColor.trim())
+  ) {
     backgroundSentence = `Set against a clean ${describeHexColor(brief.backgroundColor)} seamless studio background.`;
   } else if (shot.id === 'lifestyle-scene') {
     backgroundSentence = `Product is ${category.lifestyleSetting}.`;
   } else if (shot.id === 'flat-lay') {
-    backgroundSentence = `${shot.background}, paired with ${category.flatLayProps}.`;
+    backgroundSentence = `${cleanShotBackground}, paired with ${category.flatLayProps}.`;
   } else if (shot.id === 'studio-hero') {
-    backgroundSentence = `${shot.background}, specifically a ${category.heroBackdropNote}.`;
+    backgroundSentence = `${cleanShotBackground}, specifically a ${category.heroBackdropNote}.`;
   } else {
-    backgroundSentence = `${shot.background}.`;
+    backgroundSentence = `${cleanShotBackground}.`;
   }
 
-  // 7. Realism cues + Category Realism Module + Refine Chips
+  // 8. Realism cues + Category Realism Module + Refine Chips
   const refineInstructions = (options.refineChipIds ?? [])
     .map((id) => REFINE_CHIPS.find((c) => c.id === id)?.instruction)
     .filter((x): x is string => Boolean(x));
@@ -230,7 +313,7 @@ export function buildPrompt(
     ...refineInstructions,
   ].join(' ');
 
-  // 8. Constraints (short declarative sentences)
+  // 9. Constraints (short declarative sentences)
   const validTexts = brief.onProductTexts
     .map((t) => t.trim())
     .filter(Boolean)
@@ -238,7 +321,9 @@ export function buildPrompt(
 
   const textConstraint =
     validTexts.length > 0
-      ? validTexts.map((t) => `On-product text reads exactly "${t}", the only text in the scene.`).join(' ')
+      ? validTexts
+          .map((t) => `On-product text reads exactly "${t}", the only text in the scene.`)
+          .join(' ')
       : 'No text, typography, or printed words in the scene.';
 
   const constraints = [
@@ -253,6 +338,7 @@ export function buildPrompt(
 
   return [
     subjectSentence,
+    exactDetailsSentence,
     materialsSentence,
     compositionSentence,
     cameraSentence,
@@ -260,5 +346,20 @@ export function buildPrompt(
     backgroundSentence,
     realismSentence,
     constraints,
-  ].join(' ');
+  ]
+    .filter(Boolean)
+    .join(' ');
+}
+
+/**
+ * Reference-preserving prompt used for multi-shot Shot Sets in Photo mode so
+ * all generated presets maintain exact product consistency from the reference photo.
+ */
+export function buildPreservationPrompt(
+  brief: ProductBrief,
+  shotId: ShotPresetId,
+  options: PromptBuildOptions = {}
+): string {
+  const basePrompt = buildPrompt(brief, shotId, options);
+  return `${basePrompt} Preserve the exact product geometry, colorway, materials, proportions, and markings from the reference image without altering product design.`;
 }

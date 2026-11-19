@@ -6,6 +6,9 @@ import {
   Aperture,
   Check,
   Clock,
+  Crop,
+  Crosshair,
+  Layers,
   RotateCcw,
   Sparkles,
   Wand2,
@@ -19,7 +22,9 @@ import {
   formatModelPrice,
   getDefaultQualityForModel,
   OFFLINE_FALLBACK_MODELS,
+  pickCheapestRecommendedReferenceModel,
   pickPreferredDefaultModel,
+  pickTierSwitchModel,
   type AspectRatio,
   type DiscoverySource,
   type ModelTier,
@@ -31,13 +36,21 @@ import {
   type ShotPresetId,
 } from '@/lib/presets';
 import {
+  buildPreservationPrompt,
   buildPrompt,
   DEFAULT_BRIEF,
   SAMPLE_BRIEFS,
   type ProductBrief,
   type SampleBriefPreset,
 } from '@/lib/prompt-engine';
-import { analyzePackshotImage } from '@/lib/packshot-check';
+import { analyzePackshotImage, type PackshotCheckResult } from '@/lib/packshot-check';
+import {
+  autoCropAndCenterImage,
+  downscaleImageToMaxDim,
+  getMarketplaceAlignPreset,
+  MARKETPLACE_ALIGN_PRESETS,
+  type MarketplaceAlignPresetId,
+} from '@/lib/packshot-crop';
 import {
   DEFAULT_SETTINGS,
   inferPresetCategory,
@@ -70,6 +83,7 @@ import {
   type PresetDraftSnapshot,
 } from '@/components/user-presets-panel';
 import { ImageResultCard } from '@/components/image-result-card';
+import { AutoCropModal } from '@/components/auto-crop-modal';
 import { LightboxModal } from '@/components/lightbox-modal';
 import { LibraryView } from '@/components/library-view';
 import { UsageView } from '@/components/usage-view';
@@ -94,6 +108,60 @@ interface PendingGenerationOverride {
   promptEditedManually?: boolean;
   refineChipIds?: string[];
   enhance?: boolean;
+}
+
+const SHOT_SET_PRESET_IDS: readonly ShotPresetId[] = [
+  'marketplace-packshot',
+  'lifestyle-scene',
+  'macro-detail',
+  'flat-lay',
+  'studio-hero',
+];
+
+function getDefaultResolutionForModel(
+  model?: NormalizedImageModel | null
+): string {
+  if (!model || !model.supportedParams.includes('resolution')) {
+    return '1K';
+  }
+  const opts = model.supportedResolutions;
+  if (!opts || opts.length === 0) {
+    return '1K';
+  }
+  const oneK = opts.find((r) => r.trim().toLowerCase() === '1k');
+  return oneK ?? 'auto';
+}
+
+function getSafeResolutionForRequest(
+  resolution: string,
+  model: NormalizedImageModel
+): string | undefined {
+  if (!model.supportedParams.includes('resolution')) return undefined;
+  if (!resolution || resolution === 'auto') return undefined;
+  if (
+    model.supportedResolutions &&
+    model.supportedResolutions.length > 0 &&
+    !model.supportedResolutions.includes(resolution)
+  ) {
+    return undefined;
+  }
+  return resolution;
+}
+
+function resolveModelAspectRatio(
+  desiredRatio: AspectRatio,
+  model: NormalizedImageModel
+): AspectRatio {
+  const supported = model.supportedAspectRatios;
+  if (supported && supported.length > 0 && !supported.includes(desiredRatio)) {
+    return ASPECT_RATIOS.find((ar) => supported.includes(ar.value))?.value ?? '1:1';
+  }
+  return desiredRatio;
+}
+
+interface ShotSetGroup {
+  shotId: ShotPresetId;
+  record: GenerationRecord;
 }
 
 interface StudioAppProps {
@@ -143,7 +211,7 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
     DEFAULT_SETTINGS.defaultAspectRatio
   );
   const [clampedRatioNote, setClampedRatioNote] = useState<string | null>(null);
-  const [resolution, setResolution] = useState<string>('auto');
+  const [resolution, setResolution] = useState<string>('1K');
   const [qualitySelection, setQualitySelection] = useState<{
     modelId: string;
     value: string;
@@ -154,6 +222,18 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
   const [variations, setVariations] = useState<number>(2);
   const [enhanceEnabled, setEnhanceEnabled] = useState<boolean>(false);
   const [activeRefineChips, setActiveRefineChips] = useState<string[]>([]);
+
+  // Photo-mode Shot Set state
+  const [photoShotSetEnabled, setPhotoShotSetEnabled] = useState<boolean>(false);
+  const [shotSetPresetIds, setShotSetPresetIds] = useState<ShotPresetId[]>([
+    'marketplace-packshot',
+    'lifestyle-scene',
+    'macro-detail',
+  ]);
+  const [currentShotSet, setCurrentShotSet] = useState<ShotSetGroup[] | null>(null);
+  const [generatingShotSetPresets, setGeneratingShotSetPresets] = useState<
+    ShotPresetId[] | null
+  >(null);
 
   // Prompt inspector override state
   const [promptEditedManually, setPromptEditedManually] = useState(false);
@@ -175,6 +255,19 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
   const [generationErrors, setGenerationErrors] = useState<string[]>([]);
   const [unavailableModelBanner, setUnavailableModelBanner] = useState<string | null>(null);
 
+  // Marketplace auto-crop & centering utility state
+  const [alignPresetId, setAlignPresetId] =
+    useState<MarketplaceAlignPresetId>('amazon');
+  const [showComplianceGuides, setShowComplianceGuides] = useState(false);
+  const [aligningImageIds, setAligningImageIds] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [alignModalState, setAlignModalState] = useState<{
+    open: boolean;
+    recordId: string;
+    imageId: string;
+  }>({ open: false, recordId: '', imageId: '' });
+
   // Cost guard confirmation dialog state (> $0.25 or first usage-based run)
   const [costConfirmState, setCostConfirmState] = useState<{
     open: boolean;
@@ -183,9 +276,18 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
     estimateLabel: string;
     perImageNote?: string | null;
     modelName: string;
+    plannedShots: number;
     targetModel?: NormalizedImageModel;
     override?: PendingGenerationOverride;
-  }>({ open: false, title: 'Confirm batch cost', message: null, estimateLabel: '', modelName: '' });
+    shotSetPresets?: ShotPresetId[];
+  }>({
+    open: false,
+    title: 'Confirm batch cost',
+    message: null,
+    estimateLabel: '',
+    modelName: '',
+    plannedShots: 1,
+  });
 
   // Lightbox state
   const [lightboxState, setLightboxState] = useState<{
@@ -395,7 +497,7 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
       setModelId(nextModelId);
       setUnavailableModelBanner(null);
       setSpendLimitNotice(null);
-      setResolution('auto');
+      setResolution(getDefaultResolutionForModel(target));
       setQualitySelection(null);
       setBackgroundMode('auto');
       setOutputFormat('auto');
@@ -443,13 +545,11 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
       }
 
       const preferredForTier =
-        pickPreferredDefaultModel(tierModels, { tier: nextTier, inputMode }) ??
-        tierModels[0];
+        pickTierSwitchModel(models, nextTier, inputMode) ?? tierModels[0];
 
       const currentInTier = tierModels.some((m) => m.id === modelId);
       const defaultInTier = tierModels.some((m) => m.id === settings.defaultModel);
 
-      const nextActiveModel = currentInTier ? modelId : preferredForTier.id;
       const nextDefaultModel = defaultInTier
         ? settings.defaultModel
         : preferredForTier.id;
@@ -459,18 +559,20 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
         defaultModel: nextDefaultModel,
       });
 
-      if (!currentInTier) {
-        setModelId(preferredForTier.id);
-        setUnavailableModelBanner(null);
-        setSpendLimitNotice(null);
-        setResolution('auto');
-        setQualitySelection(null);
-        setBackgroundMode('auto');
-        setOutputFormat('auto');
-        applyAspectRatioWithClamp(aspectRatio, preferredForTier);
-        toast.info(`Switched to ${preferredForTier.name} (${nextTier} tier)`);
-      } else if (nextActiveModel !== modelId) {
-        setModelId(nextActiveModel);
+      if (!currentInTier || !defaultInTier) {
+        if (!currentInTier || modelId !== preferredForTier.id) {
+          setModelId(preferredForTier.id);
+          setUnavailableModelBanner(null);
+          setSpendLimitNotice(null);
+          setResolution(getDefaultResolutionForModel(preferredForTier));
+          setQualitySelection(null);
+          setBackgroundMode('auto');
+          setOutputFormat('auto');
+          applyAspectRatioWithClamp(aspectRatio, preferredForTier);
+        }
+        toast.info(
+          `Switched to ${preferredForTier.name} (${nextTier} tier)`
+        );
       }
     },
     [
@@ -486,12 +588,23 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
 
   const selectedShot = useMemo(() => getShotPreset(shotId), [shotId]);
 
+  const isShotSetActive =
+    inputMode === 'photo' && photoShotSetEnabled && shotSetPresetIds.length > 0;
+
+  const totalPlannedShots = isShotSetActive
+    ? shotSetPresetIds.length * variations
+    : variations;
+
   const deterministicPrompt = useMemo(
     () =>
-      buildPrompt(brief, shotId, {
-        refineChipIds: activeRefineChips,
-      }),
-    [brief, shotId, activeRefineChips]
+      isShotSetActive
+        ? buildPreservationPrompt(brief, shotSetPresetIds[0] ?? shotId, {
+            refineChipIds: activeRefineChips,
+          })
+        : buildPrompt(brief, shotId, {
+            refineChipIds: activeRefineChips,
+          }),
+    [isShotSetActive, brief, shotSetPresetIds, shotId, activeRefineChips]
   );
 
   const activePrompt = promptEditedManually ? manualPromptText : deterministicPrompt;
@@ -567,6 +680,7 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
       setIsGenerating(true);
       setElapsedMs(0);
       setPendingSlots(variations);
+      setGeneratingShotSetPresets(null);
       setGenerationErrors([]);
       setUnavailableModelBanner(null);
 
@@ -578,7 +692,7 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
             prompt: targetPrompt,
             model: targetModel.id,
             aspectRatio,
-            resolution: resolution !== 'auto' ? resolution : undefined,
+            resolution: getSafeResolutionForRequest(resolution, targetModel),
             quality: effectiveQuality !== 'auto' ? effectiveQuality : undefined,
             background: backgroundMode !== 'auto' ? backgroundMode : undefined,
             outputFormat: outputFormat !== 'auto' ? outputFormat : undefined,
@@ -676,6 +790,7 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
           totalDurationMs: payload.totalDurationMs ?? 0,
         };
 
+        setCurrentShotSet(null);
         setCurrentRecord(newRecord);
         setHistory((prev) => {
           const next = [newRecord, ...prev].slice(0, 100);
@@ -717,6 +832,7 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
         setIsGenerating(false);
         setElapsedMs(0);
         setPendingSlots(0);
+        setGeneratingShotSetPresets(null);
       }
     },
     [
@@ -736,6 +852,256 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
       selectedShot.isWhiteBackground,
       inputReferences,
       shotId,
+    ]
+  );
+
+  const executeShotSetGeneration = useCallback(
+    async (
+      targetModel: NormalizedImageModel,
+      presetList: ShotPresetId[]
+    ) => {
+      if (isGenerating || presetList.length === 0) return;
+
+      const parsedSeed =
+        customSeed.trim() && /^\d+$/.test(customSeed.trim())
+          ? Math.min(2_147_483_647, Math.max(1, parseInt(customSeed.trim(), 10)))
+          : undefined;
+
+      setIsGenerating(true);
+      setElapsedMs(0);
+      setPendingSlots(presetList.length * variations);
+      setGeneratingShotSetPresets(presetList);
+      setGenerationErrors([]);
+      setUnavailableModelBanner(null);
+
+      try {
+        const refSlice =
+          targetModel.supportsReference && inputReferences.length > 0
+            ? inputReferences.slice(0, Math.max(1, targetModel.maxReferences))
+            : undefined;
+
+        const results = await Promise.all(
+          presetList.map(async (presetId, presetIdx) => {
+            const presetSpec = getShotPreset(presetId);
+            const presetRatio = resolveModelAspectRatio(
+              presetSpec.defaultAspectRatio,
+              targetModel
+            );
+            const presetPrompt = buildPreservationPrompt(brief, presetId, {
+              refineChipIds: activeRefineChips,
+            });
+            const presetSeed = parsedSeed
+              ? (parsedSeed + presetIdx * 31337) % 2_147_483_647
+              : undefined;
+
+            const res = await fetch('/api/generate', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                prompt: presetPrompt,
+                model: targetModel.id,
+                aspectRatio: presetRatio,
+                resolution: getSafeResolutionForRequest(resolution, targetModel),
+                quality: effectiveQuality !== 'auto' ? effectiveQuality : undefined,
+                background: backgroundMode !== 'auto' ? backgroundMode : undefined,
+                outputFormat: outputFormat !== 'auto' ? outputFormat : undefined,
+                variations,
+                enhance: enhanceEnabled,
+                promptEditedManually: false,
+                rgbColors: brief.colors,
+                backgroundRgbColor: presetSpec.isWhiteBackground
+                  ? '#FFFFFF'
+                  : brief.useBackgroundColor
+                    ? brief.backgroundColor
+                    : undefined,
+                inputReferences: refSlice,
+                baseSeed: presetSeed,
+              }),
+            });
+
+            const payload = (await res.json()) as {
+              error?: string;
+              isModelUnavailable?: boolean;
+              promptUsed?: string;
+              enhanced?: boolean;
+              modelTier?: ModelTier;
+              actualCost?: number | null;
+              images?: Array<{
+                index: number;
+                dataUrl: string;
+                mediaType: string;
+                seed?: number;
+                cost: number | null;
+                durationMs: number;
+              }>;
+              errors?: Array<{ message: string; isModelUnavailable?: boolean }>;
+              totalCost?: number;
+              totalDurationMs?: number;
+            };
+
+            return { presetId, presetSpec, presetRatio, presetPrompt, res, payload };
+          })
+        );
+
+        const completedGroups: ShotSetGroup[] = [];
+        const collectedErrors: string[] = [];
+        let batchActualSpend = 0;
+        let unavailableMessage: string | null = null;
+        const costSamples: number[] = [];
+
+        for (const item of results) {
+          if (!item.res.ok) {
+            if (
+              item.res.status === 404 ||
+              item.res.status === 410 ||
+              item.payload.isModelUnavailable
+            ) {
+              unavailableMessage =
+                item.payload.error ||
+                `Model ${targetModel.name} returned ${item.res.status}.`;
+            }
+            collectedErrors.push(
+              `${item.presetSpec.name}: ${item.payload.error || `HTTP ${item.res.status}`}`
+            );
+            continue;
+          }
+
+          if (item.payload.errors && item.payload.errors.length > 0) {
+            collectedErrors.push(
+              ...item.payload.errors.map((e) => `${item.presetSpec.name}: ${e.message}`)
+            );
+          }
+
+          const rawImages = item.payload.images ?? [];
+          if (rawImages.length === 0) continue;
+
+          const isWhiteBg =
+            item.presetSpec.isWhiteBackground ||
+            (brief.useBackgroundColor &&
+              brief.backgroundColor.toUpperCase() === '#FFFFFF');
+
+          const processedImages: GeneratedImageItem[] = await Promise.all(
+            rawImages.map(async (img) => {
+              let packshotCheck = undefined;
+              if (isWhiteBg && !isSvgMedia(img.mediaType, img.dataUrl)) {
+                try {
+                  packshotCheck = await analyzePackshotImage(img.dataUrl);
+                } catch {
+                  packshotCheck = undefined;
+                }
+              }
+              return {
+                id: `${Date.now()}-${item.presetId}-${img.index}-${Math.random().toString(36).slice(2, 7)}`,
+                dataUrl: img.dataUrl,
+                mediaType: img.mediaType,
+                seed: img.seed,
+                cost: img.cost,
+                durationMs: img.durationMs,
+                packshotCheck,
+                favorite: false,
+              };
+            })
+          );
+
+          const rec: GenerationRecord = {
+            id: `gen-${Date.now()}-${item.presetId}-${Math.random().toString(36).slice(2, 7)}`,
+            createdAt: Date.now(),
+            brief: { ...brief },
+            shotId: item.presetId,
+            modelId: targetModel.id,
+            modelTier: item.payload.modelTier ?? targetModel.tier,
+            aspectRatio: item.presetRatio,
+            prompt: item.payload.promptUsed || item.presetPrompt,
+            enhanced: Boolean(item.payload.enhanced),
+            refineChips: activeRefineChips,
+            images: processedImages,
+            totalCost: item.payload.totalCost ?? 0,
+            actualCost: item.payload.actualCost ?? null,
+            totalDurationMs: item.payload.totalDurationMs ?? 0,
+          };
+
+          completedGroups.push({ shotId: item.presetId, record: rec });
+
+          if (
+            typeof item.payload.actualCost === 'number' &&
+            Number.isFinite(item.payload.actualCost)
+          ) {
+            batchActualSpend += item.payload.actualCost;
+            if (processedImages.length > 0) {
+              costSamples.push(item.payload.actualCost / processedImages.length);
+            }
+          }
+        }
+
+        if (unavailableMessage) {
+          setUnavailableModelBanner(unavailableMessage);
+        }
+
+        if (completedGroups.length > 0) {
+          const createdRecords = completedGroups.map((g) => g.record);
+          setCurrentShotSet(completedGroups);
+          setCurrentRecord(createdRecords[0]);
+          setHistory((prev) => {
+            const next = [...createdRecords, ...prev].slice(0, 100);
+            void saveHistory(next);
+            return next;
+          });
+        }
+
+        if (batchActualSpend > 0) {
+          setSessionSpendUsd((prev) => prev + batchActualSpend);
+        }
+        if (costSamples.length > 0) {
+          setCostStats((prev) => {
+            let next = prev;
+            for (const sampleCost of costSamples) {
+              next = recordModelCostSample(next, targetModel.id, sampleCost);
+            }
+            void saveModelCostStats(next);
+            return next;
+          });
+        }
+
+        const totalImages = completedGroups.reduce(
+          (sum, g) => sum + g.record.images.length,
+          0
+        );
+
+        if (collectedErrors.length > 0) {
+          setGenerationErrors(collectedErrors);
+          if (totalImages > 0) {
+            toast.warning(
+              `Shot set finished with ${totalImages} images (${collectedErrors.length} error${collectedErrors.length === 1 ? '' : 's'})`
+            );
+          } else {
+            toast.error(collectedErrors[0] || 'Shot set generation failed');
+          }
+        } else {
+          toast.success(
+            `Generated shot set: ${completedGroups.length} presets (${totalImages} images)`
+          );
+        }
+      } catch {
+        toast.error('Network error reaching generation endpoint.');
+      } finally {
+        setIsGenerating(false);
+        setElapsedMs(0);
+        setPendingSlots(0);
+        setGeneratingShotSetPresets(null);
+      }
+    },
+    [
+      isGenerating,
+      customSeed,
+      variations,
+      inputReferences,
+      brief,
+      activeRefineChips,
+      resolution,
+      effectiveQuality,
+      backgroundMode,
+      outputFormat,
+      enhanceEnabled,
     ]
   );
 
@@ -773,6 +1139,11 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
         );
       }
 
+      if (isShotSetActive && inputReferences.length === 0) {
+        toast.error('Upload or pick at least 1 reference photo before generating a shot set.');
+        return;
+      }
+
       if (activeModel.requiresReference && inputReferences.length === 0) {
         toast.error(`${activeModel.name} requires at least 1 reference photo.`);
         setInputMode('photo');
@@ -780,7 +1151,8 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
       }
 
       const activeStats = costStats[activeModel.id];
-      const estimate = formatBatchEstimate(activeModel, variations, activeStats);
+      const shotCountForBatch = isShotSetActive ? totalPlannedShots : variations;
+      const estimate = formatBatchEstimate(activeModel, shotCountForBatch, activeStats);
 
       // Optional session spend limit check
       if (
@@ -814,14 +1186,16 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
           open: true,
           title: 'Confirm usage-based generation',
           message:
-            variations > 2
-              ? `Usage-based pricing. Cost will be shown after generation. You selected ${variations} variations — consider starting with 1–2 shots first.`
+            shotCountForBatch > 2
+              ? `Usage-based pricing. Cost will be shown after generation. You queued ${shotCountForBatch} shots — consider starting with 1–2 shots first.`
               : 'Usage-based pricing. Cost will be shown after generation.',
           estimateLabel: estimate.label,
           perImageNote: null,
           modelName: activeModel.name,
+          plannedShots: shotCountForBatch,
           targetModel: activeModel,
           override,
+          shotSetPresets: isShotSetActive ? [...shotSetPresetIds] : undefined,
         });
         return;
       }
@@ -839,13 +1213,19 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
           estimateLabel: estimate.label,
           perImageNote: estimate.perImageNote,
           modelName: activeModel.name,
+          plannedShots: shotCountForBatch,
           targetModel: activeModel,
           override,
+          shotSetPresets: isShotSetActive ? [...shotSetPresetIds] : undefined,
         });
         return;
       }
 
-      await executeGeneration(activeModel, override);
+      if (isShotSetActive) {
+        await executeShotSetGeneration(activeModel, shotSetPresetIds);
+      } else {
+        await executeGeneration(activeModel, override);
+      }
     },
     [
       isGenerating,
@@ -857,9 +1237,13 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
       inputMode,
       inputReferences.length,
       costStats,
+      isShotSetActive,
+      totalPlannedShots,
       variations,
+      shotSetPresetIds,
       sessionSpendUsd,
       updateSettings,
+      executeShotSetGeneration,
       executeGeneration,
     ]
   );
@@ -908,6 +1292,23 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
           }
         : prev
     );
+    setCurrentShotSet((prev) =>
+      prev
+        ? prev.map((group) =>
+            group.record.id !== recordId
+              ? group
+              : {
+                  ...group,
+                  record: {
+                    ...group.record,
+                    images: group.record.images.map((img) =>
+                      img.id === imageId ? { ...img, favorite: !img.favorite } : img
+                    ),
+                  },
+                }
+          )
+        : null
+    );
     setLightboxState((prev) =>
       prev.record && prev.record.id === recordId
         ? {
@@ -940,8 +1341,187 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
       const remaining = prev.images.filter((img) => img.id !== imageId);
       return remaining.length > 0 ? { ...prev, images: remaining } : null;
     });
+    setCurrentShotSet((prev) => {
+      if (!prev) return prev;
+      const next = prev
+        .map((group) =>
+          group.record.id !== recordId
+            ? group
+            : {
+                ...group,
+                record: {
+                  ...group.record,
+                  images: group.record.images.filter((img) => img.id !== imageId),
+                },
+              }
+        )
+        .filter((group) => group.record.images.length > 0);
+      return next.length > 0 ? next : null;
+    });
     toast.success('Image removed');
   }, []);
+
+  const patchImageInStores = useCallback(
+    (
+      recordId: string,
+      imageId: string,
+      updater: (img: GeneratedImageItem) => GeneratedImageItem
+    ) => {
+      setHistory((prev) => {
+        const next = prev.map((rec) =>
+          rec.id !== recordId
+            ? rec
+            : {
+                ...rec,
+                images: rec.images.map((img) =>
+                  img.id === imageId ? updater(img) : img
+                ),
+              }
+        );
+        void saveHistory(next);
+        return next;
+      });
+      setCurrentRecord((prev) =>
+        prev && prev.id === recordId
+          ? {
+              ...prev,
+              images: prev.images.map((img) =>
+                img.id === imageId ? updater(img) : img
+              ),
+            }
+          : prev
+      );
+      setCurrentShotSet((prev) =>
+        prev
+          ? prev.map((group) =>
+              group.record.id !== recordId
+                ? group
+                : {
+                    ...group,
+                    record: {
+                      ...group.record,
+                      images: group.record.images.map((img) =>
+                        img.id === imageId ? updater(img) : img
+                      ),
+                    },
+                  }
+            )
+          : null
+      );
+      setLightboxState((prev) =>
+        prev.record && prev.record.id === recordId
+          ? {
+              ...prev,
+              record: {
+                ...prev.record,
+                images: prev.record.images.map((img) =>
+                  img.id === imageId ? updater(img) : img
+                ),
+              },
+            }
+          : prev
+      );
+    },
+    []
+  );
+
+  const handleApplyAlignment = useCallback(
+    (
+      recordId: string,
+      imageId: string,
+      patch: {
+        dataUrl: string;
+        mediaType: string;
+        packshotCheck: PackshotCheckResult;
+        alignedLabel: string;
+      }
+    ) => {
+      patchImageInStores(recordId, imageId, (img) => ({
+        ...img,
+        originalDataUrl: img.originalDataUrl ?? img.dataUrl,
+        dataUrl: patch.dataUrl,
+        mediaType: patch.mediaType,
+        packshotCheck: patch.packshotCheck,
+        alignedLabel: patch.alignedLabel,
+      }));
+      toast.success(`Aligned (${patch.alignedLabel})`);
+    },
+    [patchImageInStores]
+  );
+
+  const handleRevertAlignment = useCallback(
+    async (recordId: string, image: GeneratedImageItem) => {
+      if (!image.originalDataUrl) return;
+      const restoredUrl = image.originalDataUrl;
+      let restoredCheck = image.packshotCheck;
+      try {
+        restoredCheck = await analyzePackshotImage(restoredUrl);
+      } catch {
+        // Keep existing check if analysis fails
+      }
+      patchImageInStores(recordId, image.id, (img) => {
+        const next = { ...img, dataUrl: restoredUrl, packshotCheck: restoredCheck };
+        delete next.originalDataUrl;
+        delete next.alignedLabel;
+        return next;
+      });
+      toast.success('Reverted to original uncropped image');
+    },
+    [patchImageInStores]
+  );
+
+  const handleAutoCenterImages = useCallback(
+    async (record: GenerationRecord, targetImages: GeneratedImageItem[]) => {
+      const rasterTargets = targetImages.filter(
+        (img) => !isSvgMedia(img.mediaType, img.dataUrl)
+      );
+      if (rasterTargets.length === 0) return;
+
+      const preset = getMarketplaceAlignPreset(alignPresetId);
+      setAligningImageIds((prev) => {
+        const next = new Set(prev);
+        for (const img of rasterTargets) next.add(img.id);
+        return next;
+      });
+
+      let successCount = 0;
+      try {
+        for (const img of rasterTargets) {
+          const sourceUrl = img.originalDataUrl ?? img.dataUrl;
+          const result = await autoCropAndCenterImage(sourceUrl, {
+            targetFill: preset.targetFill,
+            canvasMode: preset.canvasMode,
+            backdropMode: preset.backdropMode,
+          });
+          patchImageInStores(record.id, img.id, (current) => ({
+            ...current,
+            originalDataUrl: current.originalDataUrl ?? current.dataUrl,
+            dataUrl: result.dataUrl,
+            mediaType: result.mediaType,
+            packshotCheck: result.packshotCheck,
+            alignedLabel: preset.shortLabel,
+          }));
+          successCount++;
+        }
+        if (successCount > 0) {
+          toast.success(
+            `Centered ${successCount} ${successCount === 1 ? 'shot' : 'shots'} (${preset.shortLabel})`
+          );
+        }
+      } catch (err) {
+        toast.error(
+          err instanceof Error ? err.message : 'Auto-crop alignment failed'
+        );
+      } finally {
+        setAligningImageIds((prev) => {
+          const next = new Set(prev);
+          for (const img of rasterTargets) next.delete(img.id);
+          return next;
+        });
+      }
+    },
+    [alignPresetId, patchImageInStores]
+  );
 
   const handleRemixRecord = useCallback(
     (record: GenerationRecord) => {
@@ -966,9 +1546,63 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
     [models, updateSettings, handleTabChange]
   );
 
+  const handleUseAsReference = useCallback(
+    async (sourceDataUrl: string) => {
+      try {
+        const scaledUrl = await downscaleImageToMaxDim(sourceDataUrl, 2048);
+        setInputMode('photo');
+        setInputReferences([scaledUrl]);
+        setLightboxState((prev) => ({ ...prev, open: false }));
+        handleTabChange('generate');
+
+        if (!selectedModel.supportsReference) {
+          const refModel = pickCheapestRecommendedReferenceModel(
+            models,
+            settings.modelTier
+          );
+          if (refModel) {
+            setModelId(refModel.id);
+            setUnavailableModelBanner(null);
+            setSpendLimitNotice(null);
+            setResolution(getDefaultResolutionForModel(refModel));
+            setQualitySelection(null);
+            setBackgroundMode('auto');
+            setOutputFormat('auto');
+            applyAspectRatioWithClamp(aspectRatio, refModel);
+            if (refModel.tier !== settings.modelTier) {
+              updateSettings({
+                modelTier: refModel.tier,
+                defaultModel: refModel.id,
+              });
+            }
+            toast.info(
+              `Loaded image as reference — switched to ${refModel.name} (${formatModelPrice(refModel, costStats[refModel.id])})`
+            );
+            return;
+          }
+        }
+
+        toast.success('Loaded image as reference in Photo mode');
+      } catch {
+        toast.error('Failed to prepare reference image.');
+      }
+    },
+    [
+      selectedModel.supportsReference,
+      models,
+      settings.modelTier,
+      aspectRatio,
+      applyAspectRatioWithClamp,
+      updateSettings,
+      handleTabChange,
+      costStats,
+    ]
+  );
+
   const handleClearLibrary = useCallback(() => {
     setHistory([]);
     setCurrentRecord(null);
+    setCurrentShotSet(null);
     void saveHistory([]);
     toast.success('Local library cleared');
   }, []);
@@ -1024,8 +1658,13 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
   );
 
   const batchEstimate = useMemo(
-    () => formatBatchEstimate(selectedModel, variations, costStats[selectedModel.id]),
-    [selectedModel, variations, costStats]
+    () =>
+      formatBatchEstimate(
+        selectedModel,
+        totalPlannedShots,
+        costStats[selectedModel.id]
+      ),
+    [selectedModel, totalPlannedShots, costStats]
   );
 
   const showSlowModelHint =
@@ -1238,9 +1877,11 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
 
       setResolution(
         preset.resolution !== 'auto' &&
-          resolvedModel.supportedParams.includes('resolution')
+          resolvedModel.supportedParams.includes('resolution') &&
+          (!resolvedModel.supportedResolutions ||
+            resolvedModel.supportedResolutions.includes(preset.resolution))
           ? preset.resolution
-          : 'auto'
+          : getDefaultResolutionForModel(resolvedModel)
       );
 
       if (
@@ -1309,6 +1950,7 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
                 presets={userPresets}
                 activePresetId={activePresetId}
                 models={models}
+                costStats={costStats}
                 currentSnapshot={presetDraftSnapshot}
                 onSavePreset={handleSaveUserPreset}
                 onEditPreset={handleEditUserPreset}
@@ -1352,53 +1994,150 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
                   onInputModeChange={handleInputModeChange}
                   inputReferences={inputReferences}
                   onInputReferencesChange={setInputReferences}
-                  isWhiteBackgroundPreset={selectedShot.isWhiteBackground}
+                  isWhiteBackgroundPreset={
+                    isShotSetActive
+                      ? shotSetPresetIds.includes('marketplace-packshot')
+                      : selectedShot.isWhiteBackground
+                  }
+                  variations={variations}
                 />
               </section>
 
               <hr className="border-[var(--border)]" />
 
-              {/* Section 2: Shot Preset */}
+              {/* Section 2: Shot Preset / Shot Set */}
               <section className="space-y-2.5">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <h2 className="text-[14px] font-semibold tracking-[-0.02em] text-[var(--foreground)]">
                     2. Shot Type
                   </h2>
                   <span className="font-mono text-[11px] text-[var(--muted-foreground)]">
-                    {selectedShot.defaultAspectRatio} default
+                    {isShotSetActive
+                      ? `${shotSetPresetIds.length} presets selected`
+                      : `${selectedShot.defaultAspectRatio} default`}
                   </span>
                 </div>
 
-                <div className="grid grid-cols-2 gap-2">
-                  {SHOT_PRESETS.map((preset) => {
-                    const active = shotId === preset.id;
-                    return (
-                      <button
-                        key={preset.id}
-                        type="button"
-                        onClick={() => handleSelectShotPreset(preset.id)}
-                        className={cn(
-                          'flex flex-col items-start rounded-[8px] border p-2.5 text-left transition-colors duration-150 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3]',
-                          active
-                            ? 'border-[var(--foreground)] bg-[var(--surface)]'
-                            : 'border-[var(--border)] bg-[var(--card)] hover:border-[var(--border-hover)]'
-                        )}
+                {inputMode === 'photo' ? (
+                  <div className="flex items-center justify-between gap-2 rounded-[8px] border border-[var(--border)] bg-[var(--surface)] px-2.5 py-2">
+                    <div className="min-w-0">
+                      <Label
+                        htmlFor="photo-shot-set-switch"
+                        className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--foreground)] cursor-pointer"
                       >
-                        <div className="flex w-full items-center justify-between gap-1">
-                          <span className="text-[12px] font-semibold text-[var(--foreground)] truncate">
-                            {preset.name}
-                          </span>
-                          {active ? (
-                            <Check className="h-3.5 w-3.5 shrink-0 text-[var(--foreground)]" />
-                          ) : null}
-                        </div>
-                        <span className="mt-1 line-clamp-2 text-[11px] leading-snug text-[var(--muted-foreground)]">
-                          {preset.shortDescription}
-                        </span>
+                        <Layers className="h-3.5 w-3.5 text-[var(--muted-foreground)]" />
+                        <span>Generate shot set</span>
+                      </Label>
+                      <p className="text-[10px] text-[var(--muted-foreground)]">
+                        Fires one reference-preserving request per selected preset
+                      </p>
+                    </div>
+                    <Switch
+                      id="photo-shot-set-switch"
+                      checked={photoShotSetEnabled}
+                      onCheckedChange={setPhotoShotSetEnabled}
+                    />
+                  </div>
+                ) : null}
+
+                {isShotSetActive ? (
+                  <div className="space-y-2">
+                    <div className="grid grid-cols-2 gap-2">
+                      {SHOT_SET_PRESET_IDS.map((presetId) => {
+                        const preset = getShotPreset(presetId);
+                        const active = shotSetPresetIds.includes(presetId);
+                        return (
+                          <button
+                            key={presetId}
+                            type="button"
+                            aria-pressed={active}
+                            onClick={() => {
+                              setShotSetPresetIds((prev) => {
+                                if (prev.includes(presetId)) {
+                                  if (prev.length <= 1) return prev;
+                                  return prev.filter((id) => id !== presetId);
+                                }
+                                return [...prev, presetId];
+                              });
+                            }}
+                            className={cn(
+                              'flex flex-col items-start rounded-[8px] border p-2.5 text-left transition-colors duration-150 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3]',
+                              active
+                                ? 'border-[var(--foreground)] bg-[var(--surface)]'
+                                : 'border-[var(--border)] bg-[var(--card)] hover:border-[var(--border-hover)] opacity-75'
+                            )}
+                          >
+                            <div className="flex w-full items-center justify-between gap-1">
+                              <span className="text-[12px] font-semibold text-[var(--foreground)] truncate">
+                                {preset.name}
+                              </span>
+                              <span
+                                className={cn(
+                                  'inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] border',
+                                  active
+                                    ? 'border-[var(--foreground)] bg-[var(--foreground)] text-[var(--background)]'
+                                    : 'border-[var(--border)] bg-transparent'
+                                )}
+                              >
+                                {active ? <Check className="h-3 w-3" /> : null}
+                              </span>
+                            </div>
+                            <span className="mt-1 font-mono text-[10px] text-[var(--muted-foreground)]">
+                              {preset.defaultAspectRatio} ·{' '}
+                              {preset.id === 'marketplace-packshot'
+                                ? 'White #FFFFFF'
+                                : preset.shortDescription.split(',')[0]}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <div className="flex items-center justify-between text-[11px] text-[var(--muted-foreground)]">
+                      <span className="font-mono tabular-nums">
+                        {shotSetPresetIds.length} presets × {variations} var ={' '}
+                        {totalPlannedShots} total shots
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setShotSetPresetIds([...SHOT_SET_PRESET_IDS])}
+                        className="text-[11px] font-medium text-[var(--foreground)] hover:underline cursor-pointer"
+                      >
+                        Select all 5
                       </button>
-                    );
-                  })}
-                </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-2">
+                    {SHOT_PRESETS.map((preset) => {
+                      const active = shotId === preset.id;
+                      return (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          onClick={() => handleSelectShotPreset(preset.id)}
+                          className={cn(
+                            'flex flex-col items-start rounded-[8px] border p-2.5 text-left transition-colors duration-150 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3]',
+                            active
+                              ? 'border-[var(--foreground)] bg-[var(--surface)]'
+                              : 'border-[var(--border)] bg-[var(--card)] hover:border-[var(--border-hover)]'
+                          )}
+                        >
+                          <div className="flex w-full items-center justify-between gap-1">
+                            <span className="text-[12px] font-semibold text-[var(--foreground)] truncate">
+                              {preset.name}
+                            </span>
+                            {active ? (
+                              <Check className="h-3.5 w-3.5 shrink-0 text-[var(--foreground)]" />
+                            ) : null}
+                          </div>
+                          <span className="mt-1 line-clamp-2 text-[11px] leading-snug text-[var(--muted-foreground)]">
+                            {preset.shortDescription}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </section>
 
               <hr className="border-[var(--border)]" />
@@ -1704,7 +2443,9 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
                     <span>
                       {isGenerating
                         ? `Generating ${pendingSlots} ${pendingSlots === 1 ? 'shot' : 'shots'}...`
-                        : `Generate ${variations} ${variations === 1 ? 'shot' : 'shots'}`}
+                        : isShotSetActive
+                          ? `Generate shot set (${totalPlannedShots} shots)`
+                          : `Generate ${variations} ${variations === 1 ? 'shot' : 'shots'}`}
                     </span>
                     <kbd className="font-mono text-[11px] opacity-75">⌘↵</kbd>
                   </Button>
@@ -1854,37 +2595,280 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
                 </div>
               ) : null}
 
-              {/* Results Grid / Skeletons / Empty State */}
-              {isGenerating ? (
-                <div
-                  className={cn(
-                    'grid gap-4',
-                    pendingSlots === 1
-                      ? 'grid-cols-1 max-w-xl'
-                      : 'grid-cols-1 md:grid-cols-2'
-                  )}
-                >
-                  {Array.from({ length: pendingSlots }).map((_, idx) => (
-                    <div
-                      key={idx}
-                      className="overflow-hidden rounded-[12px] border border-[var(--border)] bg-[var(--card)]"
-                    >
-                      <div className="skeleton-shimmer relative aspect-square w-full bg-[var(--surface)] border-b border-[var(--border)] flex flex-col items-center justify-center gap-1.5 px-4 text-center">
-                        <span className="font-mono text-[12px] tabular-nums text-[var(--foreground)]">
-                          Rendering variation {idx + 1} · {(elapsedMs / 1000).toFixed(1)}s
-                        </span>
-                        {showSlowModelHint ? (
-                          <span className="text-[11px] text-[var(--muted-foreground)]">
-                            This model can take over a minute
-                          </span>
-                        ) : null}
-                      </div>
-                      <div className="p-3.5 space-y-2.5">
-                        <div className="h-4 w-2/3 rounded-[4px] bg-[var(--surface)]" />
-                        <div className="h-3 w-1/3 rounded-[4px] bg-[var(--surface)]" />
-                      </div>
+              {/* Preview Marketplace Auto-Crop & Centering Toolbar */}
+              {!isGenerating &&
+              ((currentShotSet &&
+                currentShotSet.some((g) =>
+                  g.record.images.some(
+                    (img) => !isSvgMedia(img.mediaType, img.dataUrl)
+                  )
+                )) ||
+                (!currentShotSet &&
+                  currentRecord &&
+                  currentRecord.images.some(
+                    (img) => !isSvgMedia(img.mediaType, img.dataUrl)
+                  ))) ? (
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-2.5 rounded-[10px] border border-[var(--border)] bg-[var(--card)] px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <Crop className="h-3.5 w-3.5 text-[var(--muted-foreground)]" />
+                    <span className="text-[12px] font-medium text-[var(--foreground)]">
+                      Marketplace Alignment
+                    </span>
+                    <span className="hidden sm:inline text-[11px] text-[var(--muted-foreground)]">
+                      Auto-crop &amp; center products
+                    </span>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="w-40">
+                      <Select
+                        value={alignPresetId}
+                        onValueChange={(v) =>
+                          setAlignPresetId(v as MarketplaceAlignPresetId)
+                        }
+                      >
+                        <SelectTrigger
+                          aria-label="Marketplace alignment standard"
+                          className="h-7 text-[11px]"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {MARKETPLACE_ALIGN_PRESETS.map((preset) => (
+                            <SelectItem key={preset.id} value={preset.id}>
+                              {preset.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </div>
-                  ))}
+
+                    <button
+                      type="button"
+                      disabled={aligningImageIds.size > 0}
+                      onClick={() => {
+                        if (currentShotSet) {
+                          void (async () => {
+                            for (const group of currentShotSet) {
+                              await handleAutoCenterImages(
+                                group.record,
+                                group.record.images
+                              );
+                            }
+                          })();
+                        } else if (currentRecord) {
+                          void handleAutoCenterImages(
+                            currentRecord,
+                            currentRecord.images
+                          );
+                        }
+                      }}
+                      className="inline-flex h-7 items-center gap-1.5 rounded-[6px] border border-[var(--foreground)] bg-[var(--foreground)] px-2.5 text-[11px] font-medium text-[var(--background)] transition-opacity hover:opacity-90 disabled:opacity-40 cursor-pointer whitespace-nowrap"
+                    >
+                      <Crop className="h-3 w-3" />
+                      <span>
+                        {aligningImageIds.size > 0
+                          ? 'Centering...'
+                          : currentShotSet || (currentRecord && currentRecord.images.length > 1)
+                            ? 'Center All'
+                            : 'Center Shot'}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      aria-pressed={showComplianceGuides}
+                      onClick={() => setShowComplianceGuides((prev) => !prev)}
+                      title="Toggle center crosshairs and safe-zone guides on preview cards"
+                      className={cn(
+                        'inline-flex h-7 items-center gap-1 rounded-[6px] border px-2 text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap',
+                        showComplianceGuides
+                          ? 'border-[var(--foreground)] bg-[var(--surface)] text-[var(--foreground)]'
+                          : 'border-[var(--border)] bg-transparent text-[var(--muted-foreground)] hover:border-[var(--border-hover)] hover:text-[var(--foreground)]'
+                      )}
+                    >
+                      <Crosshair className="h-3 w-3" />
+                      <span>Guides</span>
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Results Grid / Shot Set Groups / Skeletons / Empty State */}
+              {isGenerating ? (
+                generatingShotSetPresets && generatingShotSetPresets.length > 0 ? (
+                  <div className="space-y-6">
+                    {generatingShotSetPresets.map((presetId) => {
+                      const presetSpec = getShotPreset(presetId);
+                      return (
+                        <div key={presetId} className="space-y-2.5">
+                          <div className="flex items-center justify-between border-b border-[var(--border)] pb-1.5">
+                            <span className="text-[13px] font-semibold text-[var(--foreground)]">
+                              {presetSpec.name}
+                            </span>
+                            <span className="font-mono text-[11px] text-[var(--muted-foreground)]">
+                              {presetSpec.defaultAspectRatio}
+                            </span>
+                          </div>
+                          <div
+                            className={cn(
+                              'grid gap-4',
+                              variations === 1
+                                ? 'grid-cols-1 max-w-xl'
+                                : 'grid-cols-1 md:grid-cols-2'
+                            )}
+                          >
+                            {Array.from({ length: variations }).map((_, idx) => (
+                              <div
+                                key={`${presetId}-${idx}`}
+                                className="overflow-hidden rounded-[12px] border border-[var(--border)] bg-[var(--card)]"
+                              >
+                                <div className="skeleton-shimmer relative aspect-square w-full bg-[var(--surface)] border-b border-[var(--border)] flex flex-col items-center justify-center gap-1.5 px-4 text-center">
+                                  <span className="font-mono text-[12px] tabular-nums text-[var(--foreground)]">
+                                    {presetSpec.name} · var {idx + 1} ·{' '}
+                                    {(elapsedMs / 1000).toFixed(1)}s
+                                  </span>
+                                  {showSlowModelHint ? (
+                                    <span className="text-[11px] text-[var(--muted-foreground)]">
+                                      This model can take over a minute
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <div className="p-3.5 space-y-2.5">
+                                  <div className="h-4 w-2/3 rounded-[4px] bg-[var(--surface)]" />
+                                  <div className="h-3 w-1/3 rounded-[4px] bg-[var(--surface)]" />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div
+                    className={cn(
+                      'grid gap-4',
+                      pendingSlots === 1
+                        ? 'grid-cols-1 max-w-xl'
+                        : 'grid-cols-1 md:grid-cols-2'
+                    )}
+                  >
+                    {Array.from({ length: pendingSlots }).map((_, idx) => (
+                      <div
+                        key={idx}
+                        className="overflow-hidden rounded-[12px] border border-[var(--border)] bg-[var(--card)]"
+                      >
+                        <div className="skeleton-shimmer relative aspect-square w-full bg-[var(--surface)] border-b border-[var(--border)] flex flex-col items-center justify-center gap-1.5 px-4 text-center">
+                          <span className="font-mono text-[12px] tabular-nums text-[var(--foreground)]">
+                            Rendering variation {idx + 1} · {(elapsedMs / 1000).toFixed(1)}s
+                          </span>
+                          {showSlowModelHint ? (
+                            <span className="text-[11px] text-[var(--muted-foreground)]">
+                              This model can take over a minute
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="p-3.5 space-y-2.5">
+                          <div className="h-4 w-2/3 rounded-[4px] bg-[var(--surface)]" />
+                          <div className="h-3 w-1/3 rounded-[4px] bg-[var(--surface)]" />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )
+              ) : currentShotSet && currentShotSet.length > 0 ? (
+                <div className="space-y-6">
+                  {currentShotSet.map((group) => {
+                    const presetSpec = getShotPreset(group.shotId);
+                    const isGroupWhiteBg =
+                      presetSpec.isWhiteBackground ||
+                      (group.record.brief.useBackgroundColor &&
+                        group.record.brief.backgroundColor.toUpperCase() === '#FFFFFF');
+                    return (
+                      <div key={group.record.id} className="space-y-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border)] pb-2">
+                          <div className="flex items-center gap-2">
+                            <Layers className="h-3.5 w-3.5 text-[var(--muted-foreground)]" />
+                            <h3 className="text-[13px] font-semibold text-[var(--foreground)]">
+                              {presetSpec.name}
+                            </h3>
+                            <span className="rounded-[4px] border border-[var(--border)] bg-[var(--surface)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--muted-foreground)]">
+                              {group.record.aspectRatio}
+                            </span>
+                          </div>
+                          <span className="font-mono text-[11px] tabular-nums text-[var(--muted-foreground)]">
+                            {group.record.actualCost !== null &&
+                            group.record.actualCost !== undefined
+                              ? `$${group.record.actualCost.toFixed(4)}`
+                              : group.record.totalCost > 0
+                                ? `~$${group.record.totalCost.toFixed(3)}`
+                                : 'Free'}{' '}
+                            · {(group.record.totalDurationMs / 1000).toFixed(1)}s
+                          </span>
+                        </div>
+
+                        <div
+                          className={cn(
+                            'grid gap-4',
+                            group.record.images.length === 1
+                              ? 'grid-cols-1 max-w-xl'
+                              : 'grid-cols-1 md:grid-cols-2'
+                          )}
+                        >
+                          {group.record.images.map((image, idx) => (
+                            <ImageResultCard
+                              key={image.id}
+                              image={image}
+                              productName={group.record.brief.name}
+                              isWhiteBackgroundShot={isGroupWhiteBg}
+                              showComplianceGuides={showComplianceGuides}
+                              targetFillPercent={Math.round(
+                                getMarketplaceAlignPreset(alignPresetId).targetFill * 100
+                              )}
+                              alignPresetLabel={
+                                getMarketplaceAlignPreset(alignPresetId).shortLabel
+                              }
+                              isAligning={aligningImageIds.has(image.id)}
+                              isGenerating={isGenerating}
+                              onOpenLightbox={() =>
+                                setLightboxState({
+                                  open: true,
+                                  record: group.record,
+                                  index: idx,
+                                })
+                              }
+                              onToggleFavorite={() =>
+                                handleToggleFavorite(group.record.id, image.id)
+                              }
+                              onDelete={() =>
+                                handleDeleteImage(group.record.id, image.id)
+                              }
+                              onRemix={() => handleRemixRecord(group.record)}
+                              onRefine={handleRefine}
+                              onRegenerateFailedCheck={() => void runGeneration()}
+                              onAutoCenter={() =>
+                                void handleAutoCenterImages(group.record, [image])
+                              }
+                              onOpenAlignModal={() =>
+                                setAlignModalState({
+                                  open: true,
+                                  recordId: group.record.id,
+                                  imageId: image.id,
+                                })
+                              }
+                              onRevertAlignment={() =>
+                                void handleRevertAlignment(group.record.id, image)
+                              }
+                              onUseAsReference={() =>
+                                void handleUseAsReference(image.dataUrl)
+                              }
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               ) : currentRecord ? (
                 <div
@@ -1901,6 +2885,14 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
                       image={image}
                       productName={currentRecord.brief.name}
                       isWhiteBackgroundShot={isCurrentWhiteBg}
+                      showComplianceGuides={showComplianceGuides}
+                      targetFillPercent={Math.round(
+                        getMarketplaceAlignPreset(alignPresetId).targetFill * 100
+                      )}
+                      alignPresetLabel={
+                        getMarketplaceAlignPreset(alignPresetId).shortLabel
+                      }
+                      isAligning={aligningImageIds.has(image.id)}
                       isGenerating={isGenerating}
                       onOpenLightbox={() =>
                         setLightboxState({
@@ -1916,6 +2908,20 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
                       onRemix={() => handleRemixRecord(currentRecord)}
                       onRefine={handleRefine}
                       onRegenerateFailedCheck={() => void runGeneration()}
+                      onAutoCenter={() =>
+                        void handleAutoCenterImages(currentRecord, [image])
+                      }
+                      onOpenAlignModal={() =>
+                        setAlignModalState({
+                          open: true,
+                          recordId: currentRecord.id,
+                          imageId: image.id,
+                        })
+                      }
+                      onRevertAlignment={() =>
+                        void handleRevertAlignment(currentRecord.id, image)
+                      }
+                      onUseAsReference={() => void handleUseAsReference(image.dataUrl)}
                     />
                   ))}
                 </div>
@@ -1975,7 +2981,9 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
                 >
                   {isGenerating
                     ? `Generating ${pendingSlots} (${(elapsedMs / 1000).toFixed(0)}s)...`
-                    : `Generate ${variations} ${variations === 1 ? 'shot' : 'shots'}`}
+                    : isShotSetActive
+                      ? `Generate shot set (${totalPlannedShots} shots)`
+                      : `Generate ${variations} ${variations === 1 ? 'shot' : 'shots'}`}
                 </Button>
                 {selectedModel.tier === 'paid' ? (
                   <span className="inline-flex h-10 items-center rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-2.5 font-mono text-[11px] tabular-nums text-[var(--muted-foreground)] whitespace-nowrap shrink-0">
@@ -2002,6 +3010,7 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
               setLightboxState({ open: true, record: rec, index: idx })
             }
             onGoToGenerate={() => handleTabChange('generate')}
+            onUseAsReference={(img) => void handleUseAsReference(img.dataUrl)}
           />
         ) : activeTab === 'usage' ? (
           <UsageView
@@ -2057,8 +3066,16 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
             ) : (
               <p className="text-[13px] leading-relaxed text-[var(--muted-foreground)]">
                 Generating{' '}
-                <span className="font-mono text-[var(--foreground)]">{variations}</span>{' '}
-                {variations === 1 ? 'variation' : 'variations'} with{' '}
+                <span className="font-mono text-[var(--foreground)]">
+                  {costConfirmState.plannedShots}
+                </span>{' '}
+                {costConfirmState.shotSetPresets &&
+                costConfirmState.shotSetPresets.length > 0
+                  ? `shot-set images (${costConfirmState.shotSetPresets.length} presets)`
+                  : costConfirmState.plannedShots === 1
+                    ? 'variation'
+                    : 'variations'}{' '}
+                with{' '}
                 <span className="font-medium text-[var(--foreground)]">
                   {costConfirmState.modelName}
                 </span>{' '}
@@ -2090,8 +3107,13 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
               onClick={() => {
                 const override = costConfirmState.override;
                 const target = costConfirmState.targetModel ?? selectedModel;
+                const shotSetPresets = costConfirmState.shotSetPresets;
                 setCostConfirmState((prev) => ({ ...prev, open: false }));
-                void executeGeneration(target, override);
+                if (shotSetPresets && shotSetPresets.length > 0) {
+                  void executeShotSetGeneration(target, shotSetPresets);
+                } else {
+                  void executeGeneration(target, override);
+                }
               }}
             >
               Confirm &amp; Generate
@@ -2125,8 +3147,50 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
             handleToggleFavorite(lightboxState.record!.id, imageId)
           }
           onRemix={() => handleRemixRecord(lightboxState.record!)}
+          onOpenAlignModal={(imageId) =>
+            setAlignModalState({
+              open: true,
+              recordId: lightboxState.record!.id,
+              imageId,
+            })
+          }
+          onUseAsReference={(img) => void handleUseAsReference(img.dataUrl)}
         />
       ) : null}
+
+      {/* Auto-Crop & Marketplace Centering Modal */}
+      {(() => {
+        const targetRecord =
+          (alignModalState.recordId &&
+            (currentRecord?.id === alignModalState.recordId
+              ? currentRecord
+              : history.find((r) => r.id === alignModalState.recordId))) ||
+          null;
+        const targetImage =
+          targetRecord?.images.find((i) => i.id === alignModalState.imageId) ??
+          null;
+
+        return (
+          <AutoCropModal
+            key={`${alignModalState.recordId}::${alignModalState.imageId}::${alignPresetId}`}
+            open={alignModalState.open && Boolean(targetImage)}
+            onOpenChange={(open) =>
+              setAlignModalState((prev) => ({ ...prev, open }))
+            }
+            image={targetImage}
+            productName={targetRecord?.brief.name ?? ''}
+            initialPresetId={alignPresetId}
+            onApplyAlignment={(patch) => {
+              if (!targetRecord || !targetImage) return;
+              handleApplyAlignment(targetRecord.id, targetImage.id, patch);
+            }}
+            onRevertOriginal={() => {
+              if (!targetRecord || !targetImage) return;
+              void handleRevertAlignment(targetRecord.id, targetImage);
+            }}
+          />
+        );
+      })()}
 
       {/* Command Palette (Cmd/Ctrl + K) */}
       <CommandPalette

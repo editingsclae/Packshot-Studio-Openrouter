@@ -209,6 +209,7 @@ export function ModelSelector({
                 role="tab"
                 aria-selected={active}
                 onClick={() => {
+                  setSearch('');
                   setOpen(false);
                   onTierChange(t);
                 }}

@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   Bookmark,
   Check,
   ChevronDown,
@@ -15,6 +16,8 @@ import {
 } from 'lucide-react';
 import {
   findModelById,
+  formatBatchEstimate,
+  isUsageOrUnknownPriced,
   type AspectRatio,
   type ModelTier,
   type NormalizedImageModel,
@@ -22,6 +25,7 @@ import {
 import type { ShotPresetId } from '@/lib/presets';
 import {
   USER_PRESET_CATEGORIES,
+  type ModelCostStatsMap,
   type UserPreset,
 } from '@/lib/db';
 import { StudioModal } from '@/components/ui/dialog';
@@ -55,6 +59,7 @@ interface UserPresetsPanelProps {
   presets: UserPreset[];
   activePresetId: string | null;
   models: NormalizedImageModel[];
+  costStats?: ModelCostStatsMap;
   currentSnapshot: PresetDraftSnapshot;
   onSavePreset: (name: string, category: string, promptText: string) => void;
   onEditPreset: (
@@ -64,6 +69,15 @@ interface UserPresetsPanelProps {
   onApplyPreset: (preset: UserPreset) => void;
   onUpdatePreset: (presetId: string) => void;
   onDeletePreset: (presetId: string) => void;
+}
+
+function isHighResolutionValue(resolution: string): boolean {
+  const norm = resolution.trim().toLowerCase();
+  if (!norm || norm === 'auto' || norm === '1k' || norm === '1024') return false;
+  if (/^(?:[2-9]|\d{2,})k$/.test(norm)) return true;
+  if (norm.includes('2k') || norm.includes('4k') || norm.includes('8k')) return true;
+  const num = parseInt(norm, 10);
+  return Number.isFinite(num) && num >= 2000;
 }
 
 function sortCategoryNames(categories: Iterable<string>): string[] {
@@ -82,6 +96,7 @@ export function UserPresetsPanel({
   presets,
   activePresetId,
   models,
+  costStats,
   currentSnapshot,
   onSavePreset,
   onEditPreset,
@@ -457,9 +472,33 @@ export function UserPresetsPanel({
                         <div className="space-y-1">
                           {group.items.map((preset) => {
                             const isActive = activePresetId === preset.id;
+                            const presetModel = findModelById(
+                              models,
+                              preset.modelId
+                            );
                             const modelName =
-                              findModelById(models, preset.modelId)?.name ??
-                              preset.modelId;
+                              presetModel?.name ?? preset.modelId;
+                            const presetEstimate = presetModel
+                              ? formatBatchEstimate(
+                                  presetModel,
+                                  Math.max(1, preset.variations || 1),
+                                  costStats?.[presetModel.id]
+                                )
+                              : null;
+                            const costDisplayLabel = !presetEstimate
+                              ? 'unknown cost'
+                              : presetModel?.tier === 'free'
+                                ? 'Free'
+                                : presetEstimate.exactTotalUsd !== null
+                                  ? presetEstimate.label
+                                  : 'unknown cost';
+
+                            const isUsageOrUnknownModel =
+                              !presetModel || isUsageOrUnknownPriced(presetModel);
+                            const showHighCostWarning =
+                              isUsageOrUnknownModel &&
+                              (isHighResolutionValue(preset.resolution) ||
+                                (preset.variations || 1) >= 3);
 
                             return (
                               <div
@@ -482,7 +521,7 @@ export function UserPresetsPanel({
                                   }}
                                   className="min-w-0 flex-1 text-left cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3] rounded-[4px]"
                                 >
-                                  <div className="flex items-center gap-1.5">
+                                  <div className="flex flex-wrap items-center gap-1.5">
                                     {isActive ? (
                                       <Check className="h-3.5 w-3.5 shrink-0 text-[var(--foreground)]" />
                                     ) : null}
@@ -492,6 +531,18 @@ export function UserPresetsPanel({
                                     {!showGroupHeader ? (
                                       <span className="shrink-0 rounded-[4px] border border-[var(--border)] bg-[var(--background)] px-1.5 py-0.2 font-mono text-[9px] uppercase tracking-wider text-[var(--muted-foreground)]">
                                         {preset.category || 'Catalog'}
+                                      </span>
+                                    ) : null}
+                                    <span className="shrink-0 rounded-[4px] border border-[var(--border)] bg-[var(--background)] px-1.5 py-0.2 font-mono text-[9px] tabular-nums text-[var(--muted-foreground)]">
+                                      {costDisplayLabel}
+                                    </span>
+                                    {showHighCostWarning ? (
+                                      <span
+                                        title="2K+ resolution or 3+ variations on a usage-based or unknown-price model — verify before generating"
+                                        className="inline-flex shrink-0 items-center gap-1 rounded-[4px] border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.2 font-mono text-[9px] font-medium text-amber-500"
+                                      >
+                                        <AlertTriangle className="h-2.5 w-2.5" />
+                                        <span>High cost risk</span>
                                       </span>
                                     ) : null}
                                   </div>
@@ -514,12 +565,11 @@ export function UserPresetsPanel({
                                         <span>{preset.quality}</span>
                                       </>
                                     ) : null}
-                                    {preset.variations > 1 ? (
-                                      <>
-                                        <span>·</span>
-                                        <span>{preset.variations}x</span>
-                                      </>
-                                    ) : null}
+                                    <span>·</span>
+                                    <span>
+                                      {preset.variations}{' '}
+                                      {preset.variations === 1 ? 'var' : 'vars'}
+                                    </span>
                                   </div>
 
                                   <p className="mt-0.5 truncate text-[11px] text-[var(--muted-foreground)]">

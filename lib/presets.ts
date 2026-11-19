@@ -4,6 +4,7 @@ export type ProductCategoryId =
   | 'apparel'
   | 'footwear'
   | 'jewelry'
+  | 'watches-accessories'
   | 'beauty-skincare'
   | 'electronics'
   | 'home-furniture'
@@ -54,6 +55,17 @@ export const PRODUCT_CATEGORIES: ProductCategorySpec[] = [
     flatLayProps:
       'raw silk ribbon edge and unpolished travertine stone slab corner',
     heroBackdropNote: 'deep obsidian-to-charcoal radial dark gradient studio backdrop',
+  },
+  {
+    id: 'watches-accessories',
+    label: 'Watches & Accessories',
+    realismModule:
+      'Crisp dial and applied indices, correct proportioned hands, anti-reflective sapphire glass with controlled reflections, visible brushed vs polished metal contrast, accurate strap texture and stitching.',
+    lifestyleSetting:
+      'resting on a honed dark slate architectural valet ledge bathed in crisp directional window daylight',
+    flatLayProps:
+      'charcoal wool watch roll edge and brushed steel buckle detail resting cleanly at frame margin',
+    heroBackdropNote: 'deep graphite-to-charcoal seamless radial gradient studio backdrop',
   },
   {
     id: 'beauty-skincare',

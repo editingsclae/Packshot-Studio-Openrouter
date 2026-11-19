@@ -427,6 +427,74 @@ export function pickPreferredDefaultModel(
   return getCheapestPaidModel(models, inputMode) ?? eligible[0] ?? models[0] ?? null;
 }
 
+/**
+ * Picks a model when switching Free <-> Paid tiers:
+ * - Paid: first matching model in RECOMMENDED_PRODUCT_MODEL_IDS, else cheapest with an exact per-image price.
+ * - Free: free Recraft model first, else first available free model.
+ */
+export function pickTierSwitchModel(
+  models: NormalizedImageModel[],
+  tier: ModelTier,
+  inputMode: 'text' | 'photo' = 'text'
+): NormalizedImageModel | null {
+  const eligible = models.filter(
+    (m) => m.tier === tier && (inputMode === 'photo' || !m.requiresReference)
+  );
+  const pool =
+    eligible.length > 0 ? eligible : models.filter((m) => m.tier === tier);
+  if (pool.length === 0) return null;
+
+  if (tier === 'paid') {
+    for (const recId of RECOMMENDED_PRODUCT_MODEL_IDS) {
+      const match = pool.find((m) => m.id === recId);
+      if (match) return match;
+    }
+    const exactPerImage = sortModelsByPriceAsc(
+      pool.filter((m) => m.priceUnit === 'image' && m.priceUsd !== null)
+    );
+    if (exactPerImage[0]) return exactPerImage[0];
+    return sortModelsByPriceAsc(pool)[0] ?? null;
+  }
+
+  return (
+    pool.find((m) => m.id === DEFAULT_FREE_MODEL_ID) ??
+    pool.find((m) => m.provider === 'recraft') ??
+    pool[0] ??
+    null
+  );
+}
+
+/**
+ * Picks the cheapest recommended model that supports reference images (for "Use as reference").
+ * Falls back to the cheapest reference-capable model overall if none of the recommended models support references.
+ */
+export function pickCheapestRecommendedReferenceModel(
+  models: NormalizedImageModel[],
+  preferredTier?: ModelTier
+): NormalizedImageModel | null {
+  const refCapable = models.filter((m) => m.supportsReference);
+  if (refCapable.length === 0) return null;
+
+  const recommendedRef = sortModelsByPriceAsc(
+    refCapable.filter((m) => isRecommendedProductModel(m.id))
+  );
+  if (preferredTier === 'free') {
+    const freeRec = recommendedRef.find((m) => m.tier === 'free');
+    if (freeRec) return freeRec;
+  }
+  if (recommendedRef.length > 0) {
+    return recommendedRef[0];
+  }
+
+  if (preferredTier === 'free') {
+    const freeRef = sortModelsByPriceAsc(
+      refCapable.filter((m) => m.tier === 'free')
+    );
+    if (freeRef[0]) return freeRef[0];
+  }
+  return sortModelsByPriceAsc(refCapable)[0] ?? null;
+}
+
 export function findModelById(
   models: NormalizedImageModel[],
   id: string
