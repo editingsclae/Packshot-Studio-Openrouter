@@ -45,9 +45,9 @@ export function TopBar({
 
   return (
     <header className="sticky top-0 z-40 h-14 w-full border-b border-[var(--border)] bg-[var(--background)]/95 backdrop-blur-sm">
-      <div className="mx-auto flex h-full max-w-[1600px] items-center justify-between gap-4 px-4 sm:px-6">
-        {/* Left: Original geometric studio mark + wordmark + breadcrumb */}
-        <div className="flex items-center gap-3 min-w-0">
+      <div className="mx-auto grid h-full max-w-[1600px] grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 px-4 sm:px-6">
+        {/* Left: Original geometric studio mark + wordmark + fixed-slot breadcrumb */}
+        <div className="justify-self-start flex items-center gap-3 min-w-0 max-w-full">
           <button
             type="button"
             onClick={() => onTabChange('generate')}
@@ -87,22 +87,43 @@ export function TopBar({
             <span>Packshot Studio</span>
           </button>
 
-          <span className="hidden sm:inline text-[var(--border-hover)] select-none" aria-hidden="true">
+          <span
+            className="hidden sm:inline shrink-0 text-[var(--border-hover)] select-none"
+            aria-hidden="true"
+          >
             /
           </span>
 
           <nav
             aria-label="Breadcrumb"
-            className="hidden sm:flex items-center gap-1.5 text-[13px] text-[var(--muted-foreground)] whitespace-nowrap truncate"
+            className="hidden sm:flex items-center gap-1.5 text-[13px] text-[var(--muted-foreground)] min-w-0"
           >
-            <span>Studio</span>
-            <span aria-hidden="true">/</span>
-            <span className="text-[var(--foreground)] font-medium">{currentBreadcrumb}</span>
+            <span className="shrink-0">Studio</span>
+            <span aria-hidden="true" className="shrink-0">
+              /
+            </span>
+            <span className="inline-grid min-w-0 overflow-hidden items-center">
+              {TAB_LABELS.map((tab) => (
+                <span
+                  key={tab.id}
+                  aria-hidden="true"
+                  className="col-start-1 row-start-1 invisible select-none whitespace-nowrap font-medium h-0 overflow-hidden"
+                >
+                  {tab.breadcrumb}
+                </span>
+              ))}
+              <span className="col-start-1 row-start-1 truncate text-[var(--foreground)] font-medium">
+                {currentBreadcrumb}
+              </span>
+            </span>
           </nav>
         </div>
 
-        {/* Center: Underline tabs */}
-        <nav aria-label="Primary sections" className="flex h-full items-center gap-1 sm:gap-2">
+        {/* Center: Underline tabs (locked center column + invariant weights/badge width) */}
+        <nav
+          aria-label="Primary sections"
+          className="justify-self-center flex h-full items-center gap-1 sm:gap-2"
+        >
           {TAB_LABELS.map((tab) => {
             const isActive = activeTab === tab.id;
             return (
@@ -126,9 +147,15 @@ export function TopBar({
                 ) : (
                   <span>{tab.label}</span>
                 )}
-                {tab.id === 'library' && libraryCount > 0 ? (
-                  <span className="font-mono text-[11px] tabular-nums text-[var(--muted-foreground)]">
-                    {libraryCount}
+                {tab.id === 'library' ? (
+                  <span
+                    aria-hidden={libraryCount <= 0}
+                    className={cn(
+                      'inline-flex min-w-[2ch] justify-center font-mono text-[11px] tabular-nums text-[var(--muted-foreground)]',
+                      libraryCount <= 0 && 'invisible'
+                    )}
+                  >
+                    {libraryCount > 0 ? libraryCount : '00'}
                   </span>
                 ) : null}
                 {isActive ? (
@@ -143,7 +170,7 @@ export function TopBar({
         </nav>
 
         {/* Right: Command palette + Theme toggle */}
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="justify-self-end flex items-center gap-2 shrink-0">
           <button
             type="button"
             onClick={onOpenCommandPalette}

@@ -76,7 +76,8 @@ import {
   type StudioSettings,
   type UserPreset,
 } from '@/lib/db';
-import { TopBar, type StudioTab } from '@/components/top-bar';
+import type { StudioTab } from '@/components/top-bar';
+import { useStudioShell } from '@/components/studio-shell';
 import { CommandPalette } from '@/components/command-palette';
 import type { DiscoveryStatus } from '@/components/model-selector';
 import type { PresetDraftSnapshot } from '@/components/panel/templates-menu';
@@ -179,6 +180,7 @@ interface StudioAppProps {
 export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
   const [activeTab, setActiveTab] = useState<StudioTab>(initialTab);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const studioShell = useStudioShell();
 
   const handleTabChange = useCallback((tab: StudioTab) => {
     setActiveTab(tab);
@@ -2254,6 +2256,25 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
     [history]
   );
 
+  useEffect(() => {
+    if (!studioShell) return;
+    return studioShell.registerHandlers({
+      onTabChange: handleTabChange,
+      onToggleTheme: () =>
+        updateSettings({ theme: settings.theme === 'dark' ? 'light' : 'dark' }),
+      onOpenCommandPalette: () => setCommandPaletteOpen(true),
+    });
+  }, [studioShell, handleTabChange, updateSettings, settings.theme]);
+
+  useEffect(() => {
+    if (!studioShell || !hydrated) return;
+    studioShell.syncChrome({
+      activeTab,
+      theme: settings.theme,
+      libraryCount: totalSavedImages,
+    });
+  }, [studioShell, hydrated, activeTab, settings.theme, totalSavedImages]);
+
   const isCurrentWhiteBg = useMemo(() => {
     if (!currentRecord) return false;
     const preset = getShotPreset(currentRecord.shotId);
@@ -2548,20 +2569,8 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
   );
 
   return (
-    <div className="min-h-screen flex flex-col bg-[var(--background)] text-[var(--foreground)]">
-      <TopBar
-        activeTab={activeTab}
-        onTabChange={handleTabChange}
-        theme={settings.theme}
-        onToggleTheme={() =>
-          updateSettings({ theme: settings.theme === 'dark' ? 'light' : 'dark' })
-        }
-        onOpenCommandPalette={() => setCommandPaletteOpen(true)}
-        libraryCount={totalSavedImages}
-      />
-
-      <main className="flex-1">
-        {activeTab === 'generate' ? (
+    <>
+      {activeTab === 'generate' ? (
           <div className="mx-auto flex max-w-[1600px] flex-col lg:flex-row min-h-[calc(100vh-56px)]">
             <LeftControlPanel
               collapsed={panelPrefs.panelCollapsed}
@@ -3358,7 +3367,6 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
             serverStatus={serverStatus}
           />
         )}
-      </main>
 
       {/* Cost Guard Confirmation Dialog (> $0.25 or first usage-based run) */}
       <StudioModal
@@ -3594,6 +3602,6 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
         theme={settings.theme}
         enhanceEnabled={enhanceEnabled}
       />
-    </div>
+    </>
   );
 }

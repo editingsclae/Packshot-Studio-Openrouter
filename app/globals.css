@@ -65,6 +65,7 @@
 
   html {
     color-scheme: dark;
+    scrollbar-gutter: stable;
   }
 
   html:not(.dark) {
