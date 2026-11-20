@@ -7,6 +7,7 @@ import {
   BarChart3,
   Camera,
   FolderOpen,
+  Layers,
   Moon,
   Search,
   Settings,
@@ -26,6 +27,8 @@ interface CommandPaletteProps {
   onLoadSample: (sample: SampleBriefPreset) => void;
   onToggleTheme: () => void;
   onToggleEnhance: () => void;
+  onCreateMultiView?: () => void;
+  hasMultiViewCandidate?: boolean;
   theme: 'dark' | 'light';
   enhanceEnabled: boolean;
 }
@@ -38,6 +41,8 @@ export function CommandPalette({
   onLoadSample,
   onToggleTheme,
   onToggleEnhance,
+  onCreateMultiView,
+  hasMultiViewCandidate = false,
   theme,
   enhanceEnabled,
 }: CommandPaletteProps) {
@@ -111,6 +116,26 @@ export function CommandPalette({
                   <Settings className="h-3.5 w-3.5 text-[var(--muted-foreground)]" />
                   <span>Go to Settings</span>
                 </Command.Item>
+                {onCreateMultiView ? (
+                  <Command.Item
+                    value="Create multi-view angles set turntable"
+                    disabled={!hasMultiViewCandidate}
+                    onSelect={() => {
+                      if (hasMultiViewCandidate) {
+                        runAndClose(onCreateMultiView);
+                      }
+                    }}
+                    className="flex cursor-pointer items-center justify-between gap-2.5 rounded-[6px] px-2.5 py-2 text-[13px] text-[var(--foreground)] aria-selected:bg-[var(--muted)] aria-disabled:opacity-45 aria-disabled:cursor-not-allowed"
+                  >
+                    <span className="flex items-center gap-2.5">
+                      <Layers className="h-3.5 w-3.5 text-[var(--muted-foreground)]" />
+                      <span>Create multi-view</span>
+                    </span>
+                    <span className="font-mono text-[10px] text-[var(--muted-foreground)]">
+                      {hasMultiViewCandidate ? 'Latest raster image' : 'No raster image'}
+                    </span>
+                  </Command.Item>
+                ) : null}
               </Command.Group>
 
               <Command.Group

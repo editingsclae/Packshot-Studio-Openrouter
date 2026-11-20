@@ -9,6 +9,7 @@ import {
   FileArchive,
   Heart,
   ImagePlus,
+  Layers,
   Maximize2,
   Search,
   Shuffle,
@@ -55,6 +56,8 @@ interface LibraryViewProps {
   onOpenLightbox: (record: GenerationRecord, imageIndex: number) => void;
   onGoToGenerate: () => void;
   onUseAsReference?: (image: GeneratedImageItem) => void;
+  onCreateMultiView?: (record: GenerationRecord, image: GeneratedImageItem) => void;
+  onDeleteRecord?: (recordId: string) => void;
 }
 
 function makeItemKey(recordId: string, imageId: string) {
@@ -80,6 +83,8 @@ export function LibraryView({
   onOpenLightbox,
   onGoToGenerate,
   onUseAsReference,
+  onCreateMultiView,
+  onDeleteRecord,
 }: LibraryViewProps) {
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
@@ -95,8 +100,9 @@ export function LibraryView({
     [records]
   );
 
-  const filteredItems = useMemo(() => {
+  const { filteredMultiViewSets, filteredItems } = useMemo(() => {
     const query = search.trim().toLowerCase();
+    const sets: GenerationRecord[] = [];
     const list: Array<{
       key: string;
       record: GenerationRecord;
@@ -124,6 +130,14 @@ export function LibraryView({
         if (!hay.includes(query)) continue;
       }
 
+      if (record.multiViewSet) {
+        if (favoritesOnly && !record.images.some((img) => img.favorite)) {
+          continue;
+        }
+        sets.push(record);
+        continue;
+      }
+
       record.images.forEach((image, idx) => {
         if (favoritesOnly && !image.favorite) return;
         list.push({
@@ -135,7 +149,7 @@ export function LibraryView({
       });
     }
 
-    return list;
+    return { filteredMultiViewSets: sets, filteredItems: list };
   }, [records, search, categoryFilter, shotFilter, favoritesOnly]);
 
   const selectedEntries = useMemo(() => {
@@ -411,7 +425,7 @@ export function LibraryView({
       ) : null}
 
       {/* Content Grid / Empty State */}
-      {filteredItems.length === 0 ? (
+      {filteredItems.length === 0 && filteredMultiViewSets.length === 0 ? (
         <div className="flex min-h-[360px] flex-col items-center justify-center rounded-[12px] border border-[var(--border)] bg-[var(--card)] p-8 text-center">
           <p className="text-[15px] font-medium text-[var(--foreground)]">
             {records.length === 0 ? 'No saved generations yet' : 'No matching shots found'}
@@ -440,8 +454,132 @@ export function LibraryView({
           </div>
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {filteredItems.map(({ key, record, image, imageIndex }) => {
+        <div className="space-y-6">
+          {/* Grouped Multi-view sets */}
+          {filteredMultiViewSets.length > 0 ? (
+            <section className="space-y-3">
+              <div className="flex items-center justify-between border-b border-[var(--border)] pb-2">
+                <div className="flex items-center gap-2">
+                  <Layers className="h-4 w-4 text-[var(--foreground)]" />
+                  <h2 className="text-[14px] font-semibold tracking-[-0.02em] text-[var(--foreground)]">
+                    Multi-view sets ({filteredMultiViewSets.length})
+                  </h2>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                {filteredMultiViewSets.map((setRec) => {
+                  const shot = getShotPreset(setRec.shotId);
+                  const model = findModelById(models, setRec.modelId);
+                  const resolvedTier =
+                    setRec.modelTier ??
+                    model?.tier ??
+                    (setRec.modelId.endsWith(':free') ? 'free' : 'paid');
+                  const setSpend = getRecordSpendUsd(setRec);
+
+                  return (
+                    <article
+                      key={setRec.id}
+                      className="flex flex-col overflow-hidden rounded-[12px] border border-[var(--border)] bg-[var(--card)] transition-colors hover:border-[var(--border-hover)]"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border)] px-3.5 py-2.5">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h3 className="truncate text-[14px] font-semibold text-[var(--foreground)]">
+                              {setRec.brief.name || 'Untitled product'}
+                            </h3>
+                            <span className="inline-flex items-center gap-1 rounded-[5px] border border-[#0070f3]/40 bg-[#0070f3]/10 px-1.5 py-0.5 font-mono text-[10px] font-medium text-[#0070f3]">
+                              <Layers className="h-2.5 w-2.5" />
+                              Multi-view set
+                            </span>
+                          </div>
+                          <p className="mt-0.5 font-mono text-[11px] text-[var(--muted-foreground)]">
+                            {setRec.images.length} views · {shot.name} ·{' '}
+                            <span className="capitalize">{resolvedTier}</span> ·{' '}
+                            {resolvedTier === 'free' ? '$0.0000' : `$${setSpend.toFixed(4)}`}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            title="Download multi-view ZIP"
+                            onClick={() => {
+                              const productSlug = slugifyProduct(setRec.brief.name);
+                              void downloadSelectedAsZip(
+                                setRec.images.map((img, i) => ({
+                                  dataUrl: img.dataUrl,
+                                  mediaType: img.mediaType,
+                                  filenameBase: `${productSlug}_${
+                                    (img.viewLabel || `view-${i + 1}`)
+                                      .toLowerCase()
+                                      .replace(/[^a-z0-9]+/g, '-')
+                                      .replace(/(^-|-$)/g, '')
+                                  }`,
+                                })),
+                                `${productSlug}_multiview-set.zip`
+                              );
+                            }}
+                            className="inline-flex h-7 items-center gap-1 rounded-[6px] border border-[var(--border)] px-2 font-mono text-[11px] text-[var(--muted-foreground)] hover:border-[var(--border-hover)] hover:text-[var(--foreground)] cursor-pointer"
+                          >
+                            <FileArchive className="h-3 w-3" />
+                            <span>ZIP</span>
+                          </button>
+
+                          {onDeleteRecord ? (
+                            <button
+                              type="button"
+                              aria-label="Delete multi-view set"
+                              onClick={() => onDeleteRecord(setRec.id)}
+                              className="inline-flex h-7 w-7 items-center justify-center rounded-[6px] border border-[var(--border)] text-[var(--muted-foreground)] hover:border-red-500/40 hover:text-red-500 cursor-pointer"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          ) : null}
+
+                          <Button
+                            variant="default"
+                            size="sm"
+                            onClick={() => onRemixRecord(setRec)}
+                            className="h-7 px-2.5 text-[12px]"
+                          >
+                            <Shuffle className="h-3 w-3" />
+                            <span>Remix</span>
+                          </Button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-4 gap-2 bg-[var(--surface)] p-3">
+                        {setRec.images.slice(0, 8).map((img, idx) => (
+                          <button
+                            key={img.id}
+                            type="button"
+                            onClick={() => onOpenLightbox(setRec, idx)}
+                            className="group/thumb relative aspect-square overflow-hidden rounded-[6px] border border-[var(--border)] bg-[#FFFFFF] cursor-zoom-in focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3]"
+                          >
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              src={img.dataUrl}
+                              alt={img.viewLabel || `View ${idx + 1}`}
+                              referrerPolicy="no-referrer"
+                              className="h-full w-full object-contain"
+                            />
+                            <span className="absolute bottom-1 left-1 rounded-[4px] bg-black/75 px-1 py-0.2 font-mono text-[9px] text-white">
+                              {img.isSourceView ? 'Source' : img.viewLabel || `V${idx + 1}`}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            </section>
+          ) : null}
+
+          {filteredItems.length > 0 ? (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {filteredItems.map(({ key, record, image, imageIndex }) => {
             const shot = getShotPreset(record.shotId);
             const category = getCategorySpec(record.brief.category);
             const model = findModelById(models, record.modelId);
@@ -601,6 +739,25 @@ export function LibraryView({
                           <ImagePlus className="h-3.5 w-3.5" />
                         </button>
                       ) : null}
+                      {onCreateMultiView ? (
+                        <span
+                          title={
+                            isSvg
+                              ? 'Multi-view is not available for SVG results — use a PNG or JPEG image.'
+                              : 'Create multi-view set'
+                          }
+                        >
+                          <button
+                            type="button"
+                            disabled={isSvg}
+                            onClick={() => onCreateMultiView(record, image)}
+                            aria-label="Create multi-view"
+                            className="inline-flex h-7 w-7 items-center justify-center rounded-[6px] border border-[var(--border)] text-[var(--muted-foreground)] hover:border-[var(--border-hover)] hover:text-[var(--foreground)] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                          >
+                            <Layers className="h-3.5 w-3.5" />
+                          </button>
+                        </span>
+                      ) : null}
                       <button
                         type="button"
                         onClick={() => {
@@ -633,6 +790,8 @@ export function LibraryView({
               </article>
             );
           })}
+            </div>
+          ) : null}
         </div>
       )}
     </div>

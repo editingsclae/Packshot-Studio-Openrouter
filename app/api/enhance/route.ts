@@ -4,6 +4,7 @@ import {
   authorizeSpend,
   ENHANCE_ESTIMATE_USD,
   isEnhancerModelAllowed,
+  isMissingSharedBudgetStoreOnVercel,
   recordSpend,
 } from '@/lib/budget';
 import { enhancePromptWithUsage } from '@/lib/openrouter';
@@ -51,6 +52,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       { error: `Enhancer model "${enhancerModel}" is not allowed on this server.` },
       { status: 403 }
+    );
+  }
+
+  if (!enhancerModel.endsWith(':free') && isMissingSharedBudgetStoreOnVercel()) {
+    return NextResponse.json(
+      {
+        error:
+          'Paid models require a shared budget store (UPSTASH_REDIS_REST_URL) when running on Vercel.',
+      },
+      { status: 503 }
     );
   }
 

@@ -7,12 +7,18 @@ import {
 export interface BudgetStore {
   getDailySpendUsd(dateKey: string): Promise<number>;
   addDailySpendUsd(dateKey: string, amountUsd: number): Promise<number>;
+  getMaxObservedImageCostUsd(modelId: string): Promise<number | null>;
+  recordObservedImageCostUsd(modelId: string, perImageCostUsd: number): Promise<number>;
 }
 
 const DAILY_SPEND_TTL_SECONDS = 48 * 60 * 60; // 48 hours
+const MODEL_COST_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
+export const UNKNOWN_PAID_ESTIMATE_PER_IMAGE_USD = 0.05;
+export const ENHANCE_ESTIMATE_USD = 0.001;
 
 class InMemoryBudgetStore implements BudgetStore {
   private readonly totals = new Map<string, number>();
+  private readonly maxObservedCosts = new Map<string, number>();
 
   async getDailySpendUsd(dateKey: string): Promise<number> {
     return this.totals.get(dateKey) ?? 0;
@@ -34,6 +40,24 @@ class InMemoryBudgetStore implements BudgetStore {
     }
     return next;
   }
+
+  async getMaxObservedImageCostUsd(modelId: string): Promise<number | null> {
+    const val = this.maxObservedCosts.get(modelId);
+    return typeof val === 'number' && Number.isFinite(val) && val > 0 ? val : null;
+  }
+
+  async recordObservedImageCostUsd(
+    modelId: string,
+    perImageCostUsd: number
+  ): Promise<number> {
+    if (!Number.isFinite(perImageCostUsd) || perImageCostUsd <= 0) {
+      return (await this.getMaxObservedImageCostUsd(modelId)) ?? 0;
+    }
+    const prev = this.maxObservedCosts.get(modelId) ?? 0;
+    const next = Math.max(prev, perImageCostUsd);
+    this.maxObservedCosts.set(modelId, next);
+    return next;
+  }
 }
 
 class UpstashRedisBudgetStore implements BudgetStore {
@@ -47,6 +71,10 @@ class UpstashRedisBudgetStore implements BudgetStore {
 
   private keyFor(dateKey: string): string {
     return `packshot:daily-spend:${dateKey}`;
+  }
+
+  private modelMaxKeyFor(modelId: string): string {
+    return `packshot:model-max-cost:${modelId}`;
   }
 
   async getDailySpendUsd(dateKey: string): Promise<number> {
@@ -90,10 +118,73 @@ class UpstashRedisBudgetStore implements BudgetStore {
     const parsed = Number(data?.[0]?.result ?? 0);
     return Number.isFinite(parsed) ? parsed : 0;
   }
+
+  async getMaxObservedImageCostUsd(modelId: string): Promise<number | null> {
+    const key = encodeURIComponent(this.modelMaxKeyFor(modelId));
+    const res = await fetch(`${this.baseUrl}/get/${key}`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+      },
+      cache: 'no-store',
+    });
+    if (!res.ok) {
+      throw new Error(`Upstash Redis GET failed (${res.status})`);
+    }
+    const data = (await res.json()) as { result?: string | number | null };
+    const parsed = Number(data?.result ?? 0);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  async recordObservedImageCostUsd(
+    modelId: string,
+    perImageCostUsd: number
+  ): Promise<number> {
+    if (!Number.isFinite(perImageCostUsd) || perImageCostUsd <= 0) {
+      return (await this.getMaxObservedImageCostUsd(modelId)) ?? 0;
+    }
+    const current = (await this.getMaxObservedImageCostUsd(modelId)) ?? 0;
+    const next = Math.max(current, perImageCostUsd);
+    if (next > current) {
+      const key = this.modelMaxKeyFor(modelId);
+      const res = await fetch(`${this.baseUrl}/pipeline`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify([
+          ['SET', key, next.toFixed(6), 'EX', MODEL_COST_TTL_SECONDS],
+        ]),
+        cache: 'no-store',
+      });
+      if (!res.ok) {
+        throw new Error(`Upstash Redis SET failed (${res.status})`);
+      }
+    }
+    return next;
+  }
 }
 
 const memoryStore = new InMemoryBudgetStore();
 let cachedUpstash: { url: string; token: string; store: UpstashRedisBudgetStore } | null = null;
+
+export function isMissingSharedBudgetStoreOnVercel(): boolean {
+  return Boolean(process.env.VERCEL) && !process.env.UPSTASH_REDIS_REST_URL?.trim();
+}
+
+export function warnIfVercelBudgetMissing(): void {
+  const g = globalThis as typeof globalThis & { __packshotVercelBudgetWarned?: boolean };
+  if (g.__packshotVercelBudgetWarned) return;
+  if (isMissingSharedBudgetStoreOnVercel()) {
+    g.__packshotVercelBudgetWarned = true;
+    console.warn(
+      '[budget] WARNING: VERCEL is set without UPSTASH_REDIS_REST_URL. Paid models will return 503 because a shared budget store is required across serverless instances.'
+    );
+  }
+}
+
+warnIfVercelBudgetMissing();
 
 export function getBudgetStore(): BudgetStore {
   const url = process.env.UPSTASH_REDIS_REST_URL?.trim();
@@ -178,16 +269,93 @@ export function isEnhancerModelAllowed(modelId: string): boolean {
   return allowed.has(modelId);
 }
 
-const UNKNOWN_PAID_ESTIMATE_PER_IMAGE_USD = 0.05;
-export const ENHANCE_ESTIMATE_USD = 0.001;
+const HIGH_QUALITY_VALUES = new Set([
+  'high',
+  'hd',
+  'ultra',
+  'max',
+  'highest',
+  'best',
+  '4k',
+  'pro',
+]);
+
+export function capQualityForUsageModel(
+  quality: string | undefined,
+  modelSpec?: NormalizedImageModel
+): string | undefined {
+  const allowHigh =
+    process.env.ALLOW_HIGH_QUALITY?.trim().toLowerCase() === 'true';
+  if (allowHigh) {
+    return quality;
+  }
+
+  // Only restrict models whose priceUnit is not "image"
+  if (!modelSpec || modelSpec.priceUnit === 'image') {
+    return quality;
+  }
+
+  const supported = modelSpec.supportedQualities;
+  const mediumOption =
+    supported?.find((q) => q.toLowerCase() === 'medium') ??
+    supported?.find((q) => !HIGH_QUALITY_VALUES.has(q.toLowerCase())) ??
+    'medium';
+
+  if (!quality || quality === 'auto') {
+    return modelSpec.supportedParams.includes('quality')
+      ? mediumOption
+      : quality;
+  }
+
+  if (HIGH_QUALITY_VALUES.has(quality.toLowerCase())) {
+    return mediumOption;
+  }
+
+  return quality;
+}
+
+export async function getObservedModelCostUsd(
+  modelId: string
+): Promise<number | null> {
+  const store = getBudgetStore();
+  try {
+    return await store.getMaxObservedImageCostUsd(modelId);
+  } catch (err) {
+    console.error('[budget] Failed reading max observed model cost:', err);
+    return null;
+  }
+}
+
+export async function recordObservedModelCostUsd(
+  modelId: string,
+  perImageCostUsd: number
+): Promise<number> {
+  if (!Number.isFinite(perImageCostUsd) || perImageCostUsd <= 0) {
+    return 0;
+  }
+  const store = getBudgetStore();
+  try {
+    return await store.recordObservedImageCostUsd(modelId, perImageCostUsd);
+  } catch (err) {
+    console.error('[budget] Failed recording max observed model cost:', err);
+    return 0;
+  }
+}
 
 export function estimateImageRequestCostUsd(options: {
   modelId: string;
   modelSpec?: NormalizedImageModel;
   variations: number;
   includeEnhance?: boolean;
+  observedMaxCostUsd?: number | null;
 }): number {
-  const { modelId, modelSpec, variations, includeEnhance } = options;
+  const {
+    modelId,
+    modelSpec,
+    variations,
+    includeEnhance,
+    observedMaxCostUsd,
+  } = options;
   const count = Math.max(1, variations);
   const enhanceCost = includeEnhance ? ENHANCE_ESTIMATE_USD : 0;
 
@@ -195,10 +363,23 @@ export function estimateImageRequestCostUsd(options: {
     return enhanceCost;
   }
 
-  const unitCost =
-    modelSpec && typeof modelSpec.priceUsd === 'number' && Number.isFinite(modelSpec.priceUsd)
-      ? Math.max(0, modelSpec.priceUsd)
-      : UNKNOWN_PAID_ESTIMATE_PER_IMAGE_USD;
+  let unitCost: number;
+  if (
+    modelSpec &&
+    modelSpec.priceUnit === 'image' &&
+    typeof modelSpec.priceUsd === 'number' &&
+    Number.isFinite(modelSpec.priceUsd)
+  ) {
+    unitCost = Math.max(0, modelSpec.priceUsd);
+  } else {
+    const observed =
+      typeof observedMaxCostUsd === 'number' &&
+      Number.isFinite(observedMaxCostUsd) &&
+      observedMaxCostUsd > 0
+        ? observedMaxCostUsd
+        : 0;
+    unitCost = Math.max(observed, UNKNOWN_PAID_ESTIMATE_PER_IMAGE_USD);
+  }
 
   return unitCost * count + enhanceCost;
 }
@@ -271,3 +452,4 @@ export async function recordSpend(amountUsd: number): Promise<number> {
     return 0;
   }
 }
+

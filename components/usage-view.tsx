@@ -368,10 +368,15 @@ export function UsageView({
                     className="flex items-center justify-between gap-3 py-2.5 first:pt-0 last:pb-0"
                   >
                     <div className="min-w-0">
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <span className="truncate text-[13px] font-medium text-[var(--foreground)]">
                           {rec.brief.name || 'Untitled product'}
                         </span>
+                        {rec.multiViewSet ? (
+                          <span className="shrink-0 rounded-[4px] border border-[var(--border)] bg-[var(--surface)] px-1.5 py-0.2 font-mono text-[10px] text-[var(--foreground)]">
+                            Multi-view set
+                          </span>
+                        ) : null}
                         <span className="shrink-0 font-mono text-[10px] text-[var(--muted-foreground)]">
                           {shotName}
                         </span>
@@ -381,7 +386,13 @@ export function UsageView({
                         <span>·</span>
                         <span>
                           {rec.images.length}{' '}
-                          {rec.images.length === 1 ? 'shot' : 'shots'}
+                          {rec.multiViewSet
+                            ? rec.images.length === 1
+                              ? 'view'
+                              : 'views'
+                            : rec.images.length === 1
+                              ? 'shot'
+                              : 'shots'}
                         </span>
                         <span>·</span>
                         <span>{formatRecordTimestamp(rec.createdAt)}</span>

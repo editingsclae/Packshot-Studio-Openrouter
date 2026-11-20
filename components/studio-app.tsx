@@ -85,9 +85,14 @@ import {
 import { ImageResultCard } from '@/components/image-result-card';
 import { AutoCropModal } from '@/components/auto-crop-modal';
 import { LightboxModal } from '@/components/lightbox-modal';
+import {
+  MultiViewModal,
+  type MultiViewInitialSession,
+} from '@/components/multiview-modal';
 import { LibraryView } from '@/components/library-view';
 import { UsageView } from '@/components/usage-view';
 import { SettingsView } from '@/components/settings-view';
+import { detectNearestAspectRatio } from '@/lib/multiview';
 import { StudioModal } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -291,6 +296,7 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
     targetModel?: NormalizedImageModel;
     override?: PendingGenerationOverride;
     shotSetPresets?: ShotPresetId[];
+    onConfirmCustom?: () => void;
   }>({
     open: false,
     title: 'Confirm batch cost',
@@ -305,7 +311,14 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
     open: boolean;
     record: GenerationRecord | null;
     index: number;
+    anchorCompareDataUrl?: string;
   }>({ open: false, record: null, index: 0 });
+
+  // Multi-view set modal state
+  const [multiViewState, setMultiViewState] = useState<{
+    open: boolean;
+    session: MultiViewInitialSession | null;
+  }>({ open: false, session: null });
 
   const applyDiscoveryResponse = useCallback(
     (data: {
@@ -1625,6 +1638,81 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
     [alignPresetId, patchImageInStores]
   );
 
+  const ensureReferenceCapableModel = useCallback(
+    (preferredModel?: NormalizedImageModel): NormalizedImageModel | null => {
+      const candidate = preferredModel ?? selectedModel;
+      if (candidate.supportsReference) {
+        return candidate;
+      }
+      const refModel = pickCheapestRecommendedReferenceModel(
+        models,
+        settings.modelTier
+      );
+      if (!refModel) return null;
+      setModelId(refModel.id);
+      setUnavailableModelBanner(null);
+      setSpendLimitNotice(null);
+      setResolution(getDefaultResolutionForModel(refModel));
+      setQualitySelection(null);
+      setBackgroundMode('auto');
+      setOutputFormat('auto');
+      applyAspectRatioWithClamp(aspectRatio, refModel);
+      if (refModel.tier !== settings.modelTier) {
+        updateSettings({
+          modelTier: refModel.tier,
+          defaultModel: refModel.id,
+        });
+      }
+      toast.info(
+        `Switched to ${refModel.name} (${formatModelPrice(refModel, costStats[refModel.id])}) for reference image support`
+      );
+      return refModel;
+    },
+    [
+      selectedModel,
+      models,
+      settings.modelTier,
+      aspectRatio,
+      applyAspectRatioWithClamp,
+      updateSettings,
+      costStats,
+    ]
+  );
+
+  const handleOpenMultiView = useCallback(
+    async (record: GenerationRecord | null, image: GeneratedImageItem) => {
+      if (isSvgMedia(image.mediaType, image.dataUrl)) {
+        toast.info(
+          'Multi-view is not available for SVG results — use a PNG or JPEG image.'
+        );
+        return;
+      }
+
+      const refModel = ensureReferenceCapableModel();
+      if (!refModel) {
+        toast.error('No reference-capable model is currently available.');
+        return;
+      }
+
+      const detectedRatio = await detectNearestAspectRatio(
+        image.dataUrl,
+        record?.aspectRatio ?? aspectRatio
+      );
+
+      setMultiViewState({
+        open: true,
+        session: {
+          sessionKey: `mv-open-${image.id}-${Date.now()}`,
+          anchorImage: image,
+          productName: record?.brief.name || brief.name || 'Product',
+          brief: record?.brief ?? brief,
+          initialAspectRatio: detectedRatio,
+        },
+      });
+    },
+    [ensureReferenceCapableModel, aspectRatio, brief]
+  );
+
   const handleRemixRecord = useCallback(
     (record: GenerationRecord) => {
       const recModel = findModelById(models, record.modelId);
@@ -1642,10 +1730,42 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
       setActiveRefineChips(record.refineChips ?? []);
       setManualPromptText(record.prompt);
       setPromptEditedManually(true);
+
+      if (record.multiViewSet) {
+        const refModel = ensureReferenceCapableModel(recModel);
+        if (!refModel) {
+          toast.error('No reference-capable model available for this multi-view set.');
+          return;
+        }
+        const sourceImg =
+          record.images.find((i) => i.isSourceView) ??
+          record.images[0];
+        if (!sourceImg) {
+          toast.error('This multi-view record has no anchor image.');
+          return;
+        }
+        setMultiViewState({
+          open: true,
+          session: {
+            sessionKey: `mv-remix-${record.id}-${Date.now()}`,
+            anchorImage: {
+              ...sourceImg,
+              dataUrl: record.multiViewSet.sourceImageDataUrl || sourceImg.dataUrl,
+            },
+            productName: record.brief.name || 'Product',
+            brief: record.brief,
+            initialAspectRatio: record.aspectRatio,
+            existingRecord: record,
+          },
+        });
+        toast.success(`Restored Multi-view setup for "${record.brief.name}"`);
+        return;
+      }
+
       handleTabChange('generate');
       toast.success(`Loaded "${record.brief.name}" into Studio`);
     },
-    [models, updateSettings, handleTabChange]
+    [models, updateSettings, handleTabChange, ensureReferenceCapableModel]
   );
 
   const handleUseAsReference = useCallback(
@@ -1700,6 +1820,154 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
       costStats,
     ]
   );
+
+  const handleDeleteRecord = useCallback((recordId: string) => {
+    setHistory((prev) => {
+      const next = prev.filter((rec) => rec.id !== recordId);
+      void saveHistory(next);
+      return next;
+    });
+    setCurrentRecord((prev) => (prev?.id === recordId ? null : prev));
+    toast.success('Multi-view set deleted');
+  }, []);
+
+  const handleSaveMultiViewRecord = useCallback((record: GenerationRecord) => {
+    setHistory((prev) => {
+      const idx = prev.findIndex((r) => r.id === record.id);
+      const next =
+        idx >= 0
+          ? prev.map((r, i) => (i === idx ? record : r))
+          : [record, ...prev].slice(0, 100);
+      void saveHistory(next);
+      return next;
+    });
+  }, []);
+
+  const handleAuthorizePaidBatch = useCallback(
+    (params: {
+      model: NormalizedImageModel;
+      shotCount: number;
+      description: string;
+      onConfirm: () => void;
+    }): boolean => {
+      const { model, shotCount, onConfirm } = params;
+      setSpendLimitNotice(null);
+      const estimate = formatBatchEstimate(model, shotCount, costStats[model.id]);
+
+      if (
+        settings.sessionSpendLimitUsd !== null &&
+        settings.sessionSpendLimitUsd > 0 &&
+        model.tier === 'paid'
+      ) {
+        const projected =
+          estimate.exactTotalUsd !== null
+            ? sessionSpendUsd + estimate.exactTotalUsd
+            : sessionSpendUsd;
+        const limitExceeded =
+          estimate.exactTotalUsd !== null
+            ? projected > settings.sessionSpendLimitUsd
+            : sessionSpendUsd >= settings.sessionSpendLimitUsd;
+
+        if (limitExceeded) {
+          const msg =
+            estimate.exactTotalUsd !== null
+              ? `Session spend limit reached: $${sessionSpendUsd.toFixed(4)} spent + ${estimate.label} estimate exceeds your $${settings.sessionSpendLimitUsd.toFixed(2)} limit.`
+              : `Session spend limit reached: $${sessionSpendUsd.toFixed(4)} spent reaches your $${settings.sessionSpendLimitUsd.toFixed(2)} limit.`;
+          setSpendLimitNotice(msg);
+          toast.error(msg);
+          return false;
+        }
+      }
+
+      if (estimate.needsFirstRunConfirm) {
+        setCostConfirmState({
+          open: true,
+          title: 'Confirm usage-based generation',
+          message:
+            shotCount > 2
+              ? `Usage-based pricing. Cost will be shown after generation. You queued ${shotCount} views — consider starting with 1–2 views first.`
+              : 'Usage-based pricing. Cost will be shown after generation.',
+          estimateLabel: estimate.label,
+          perImageNote: null,
+          modelName: model.name,
+          plannedShots: shotCount,
+          targetModel: model,
+          onConfirmCustom: onConfirm,
+        });
+        return false;
+      }
+
+      if (
+        model.tier === 'paid' &&
+        estimate.exactTotalUsd !== null &&
+        estimate.exactTotalUsd > 0.25
+      ) {
+        setCostConfirmState({
+          open: true,
+          title: 'Confirm batch cost',
+          message: null,
+          estimateLabel: estimate.label,
+          perImageNote: estimate.perImageNote,
+          modelName: model.name,
+          plannedShots: shotCount,
+          targetModel: model,
+          onConfirmCustom: onConfirm,
+        });
+        return false;
+      }
+
+      return true;
+    },
+    [costStats, settings.sessionSpendLimitUsd, sessionSpendUsd]
+  );
+
+  const handleChargeActualSpend = useCallback(
+    (targetModelId: string, totalActualSpend: number, perImageSamples: number[]) => {
+      if (totalActualSpend > 0) {
+        setSessionSpendUsd((prev) => prev + totalActualSpend);
+      }
+      if (perImageSamples.length > 0) {
+        setCostStats((prev) => {
+          let next = prev;
+          for (const sample of perImageSamples) {
+            next = recordModelCostSample(next, targetModelId, sample);
+          }
+          void saveModelCostStats(next);
+          return next;
+        });
+      }
+    },
+    []
+  );
+
+  const handleReportApiFailure = useCallback(
+    (status: number, message: string, isModelUnavailable?: boolean) => {
+      if (status === 404 || status === 410 || isModelUnavailable) {
+        setUnavailableModelBanner(message);
+      }
+      if (status === 402) {
+        setSpendLimitNotice(message);
+      }
+    },
+    []
+  );
+
+  const latestRasterCandidate = useMemo<{
+    record: GenerationRecord | null;
+    image: GeneratedImageItem;
+  } | null>(() => {
+    if (currentRecord) {
+      const img = currentRecord.images.find(
+        (i) => !isSvgMedia(i.mediaType, i.dataUrl)
+      );
+      if (img) return { record: currentRecord, image: img };
+    }
+    for (const rec of history) {
+      const img = rec.images.find((i) => !isSvgMedia(i.mediaType, i.dataUrl));
+      if (img) return { record: rec, image: img };
+    }
+    return null;
+  }, [currentRecord, history]);
 
   const handleClearLibrary = useCallback(() => {
     setHistory([]);
@@ -2883,6 +3151,9 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
                                   onUseAsReference={() =>
                                     void handleUseAsReference(slot.image!.dataUrl)
                                   }
+                                  onCreateMultiView={() =>
+                                    void handleOpenMultiView(null, slot.image!)
+                                  }
                                 />
                               ) : slot.status === 'error' ? (
                                 <div
@@ -2969,6 +3240,9 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
                           onRegenerateFailedCheck={() => {}}
                           onUseAsReference={() =>
                             void handleUseAsReference(slot.image!.dataUrl)
+                          }
+                          onCreateMultiView={() =>
+                            void handleOpenMultiView(null, slot.image!)
                           }
                         />
                       ) : slot.status === 'error' ? (
@@ -3103,6 +3377,9 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
                               onUseAsReference={() =>
                                 void handleUseAsReference(image.dataUrl)
                               }
+                              onCreateMultiView={() =>
+                                void handleOpenMultiView(group.record, image)
+                              }
                             />
                           ))}
                         </div>
@@ -3162,6 +3439,9 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
                         void handleRevertAlignment(currentRecord.id, image)
                       }
                       onUseAsReference={() => void handleUseAsReference(image.dataUrl)}
+                      onCreateMultiView={() =>
+                        void handleOpenMultiView(currentRecord, image)
+                      }
                     />
                   ))}
                 </div>
@@ -3256,6 +3536,8 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
             }
             onGoToGenerate={() => handleTabChange('generate')}
             onUseAsReference={(img) => void handleUseAsReference(img.dataUrl)}
+            onCreateMultiView={(rec, img) => void handleOpenMultiView(rec, img)}
+            onDeleteRecord={handleDeleteRecord}
           />
         ) : activeTab === 'usage' ? (
           <UsageView
@@ -3353,8 +3635,15 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
                 const override = costConfirmState.override;
                 const target = costConfirmState.targetModel ?? selectedModel;
                 const shotSetPresets = costConfirmState.shotSetPresets;
-                setCostConfirmState((prev) => ({ ...prev, open: false }));
-                if (shotSetPresets && shotSetPresets.length > 0) {
+                const onConfirmCustom = costConfirmState.onConfirmCustom;
+                setCostConfirmState((prev) => ({
+                  ...prev,
+                  open: false,
+                  onConfirmCustom: undefined,
+                }));
+                if (onConfirmCustom) {
+                  onConfirmCustom();
+                } else if (shotSetPresets && shotSetPresets.length > 0) {
                   void executeShotSetGeneration(target, shotSetPresets);
                 } else {
                   void executeGeneration(target, override);
@@ -3370,6 +3659,7 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
       {/* Lightbox Modal */}
       {lightboxState.record ? (
         <LightboxModal
+          key={lightboxState.record.id}
           open={lightboxState.open}
           onOpenChange={(open) => setLightboxState((prev) => ({ ...prev, open }))}
           images={lightboxState.record.images}
@@ -3400,6 +3690,41 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
             })
           }
           onUseAsReference={(img) => void handleUseAsReference(img.dataUrl)}
+          onCreateMultiView={(img) =>
+            void handleOpenMultiView(lightboxState.record, img)
+          }
+          anchorCompareDataUrl={
+            lightboxState.anchorCompareDataUrl ??
+            lightboxState.record.multiViewSet?.sourceImageDataUrl
+          }
+        />
+      ) : null}
+
+      {/* Multi-view set Panel */}
+      {multiViewState.session ? (
+        <MultiViewModal
+          key={multiViewState.session.sessionKey}
+          open={multiViewState.open}
+          onOpenChange={(open) =>
+            setMultiViewState((prev) => ({ ...prev, open }))
+          }
+          session={multiViewState.session}
+          models={models}
+          initialModelId={selectedModel.id}
+          costStats={costStats}
+          onSwitchModel={(nextId) => handleSelectModel(nextId, false)}
+          onAuthorizePaidBatch={handleAuthorizePaidBatch}
+          onChargeActualSpend={handleChargeActualSpend}
+          onReportApiFailure={handleReportApiFailure}
+          onSaveMultiViewRecord={handleSaveMultiViewRecord}
+          onOpenCompareLightbox={(rec, idx, anchorUrl) =>
+            setLightboxState({
+              open: true,
+              record: rec,
+              index: idx,
+              anchorCompareDataUrl: anchorUrl,
+            })
+          }
         />
       ) : null}
 
@@ -3448,6 +3773,15 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
           updateSettings({ theme: settings.theme === 'dark' ? 'light' : 'dark' })
         }
         onToggleEnhance={() => setEnhanceEnabled((prev) => !prev)}
+        onCreateMultiView={() => {
+          if (latestRasterCandidate) {
+            void handleOpenMultiView(
+              latestRasterCandidate.record,
+              latestRasterCandidate.image
+            );
+          }
+        }}
+        hasMultiViewCandidate={Boolean(latestRasterCandidate)}
         theme={settings.theme}
         enhanceEnabled={enhanceEnabled}
       />

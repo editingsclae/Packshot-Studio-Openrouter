@@ -1,16 +1,18 @@
 'use client';
 
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Columns2,
   Copy,
   Crop,
   Download,
   Heart,
   ImagePlus,
   Info,
+  Layers,
   Shuffle,
   XCircle,
 } from 'lucide-react';
@@ -41,6 +43,8 @@ interface LightboxModalProps {
   onRemix: () => void;
   onOpenAlignModal?: (imageId: string) => void;
   onUseAsReference?: (image: GeneratedImageItem) => void;
+  onCreateMultiView?: (image: GeneratedImageItem) => void;
+  anchorCompareDataUrl?: string;
 }
 
 export function LightboxModal({
@@ -59,7 +63,11 @@ export function LightboxModal({
   onRemix,
   onOpenAlignModal,
   onUseAsReference,
+  onCreateMultiView,
+  anchorCompareDataUrl,
 }: LightboxModalProps) {
+  const [compareMode, setCompareMode] = useState(false);
+  const [sliderPos, setSliderPos] = useState(50);
   const image = images[activeIndex];
 
   useEffect(() => {
@@ -130,13 +138,78 @@ export function LightboxModal({
       <div className="grid grid-cols-1 lg:grid-cols-[1.35fr_340px]">
         {/* Left: Full image canvas */}
         <div className="relative flex min-h-[340px] sm:min-h-[500px] items-center justify-center bg-[var(--surface)] border-b lg:border-b-0 lg:border-r border-[var(--border)] p-4">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={image.dataUrl}
-            alt={productName}
-            referrerPolicy="no-referrer"
-            className="max-h-[72vh] w-auto object-contain rounded-[6px]"
-          />
+          {compareMode && anchorCompareDataUrl && !image.isSourceView && !isSvg ? (
+            <div className="relative flex h-[66vh] max-h-[640px] w-full max-w-[640px] items-center justify-center overflow-hidden rounded-[8px] border border-[var(--border)] bg-[#FFFFFF] select-none">
+              {/* Right / Base: Generated Result */}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={image.dataUrl}
+                alt={`${productName} generated view`}
+                referrerPolicy="no-referrer"
+                className="h-full w-full object-contain"
+              />
+              {/* Left / Clipped Overlay: Original Anchor */}
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-0 overflow-hidden bg-[#FFFFFF]"
+                style={{
+                  clipPath: `inset(0 ${100 - sliderPos}% 0 0)`,
+                }}
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={anchorCompareDataUrl}
+                  alt="Original anchor product"
+                  referrerPolicy="no-referrer"
+                  className="h-full w-full object-contain"
+                />
+              </div>
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-y-0 w-0.5 bg-[#0070f3]"
+                style={{ left: `${sliderPos}%` }}
+              />
+              <span className="pointer-events-none absolute left-3 top-3 rounded-[5px] bg-black/75 px-2 py-0.5 font-mono text-[10px] text-white">
+                Anchor
+              </span>
+              <span className="pointer-events-none absolute right-3 top-3 rounded-[5px] bg-black/75 px-2 py-0.5 font-mono text-[10px] text-white">
+                {image.viewLabel || 'Result'}
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={sliderPos}
+                onChange={(e) => setSliderPos(Number(e.target.value))}
+                aria-label="Compare anchor vs result slider"
+                className="absolute bottom-3 left-4 right-4 z-10 accent-[#0070f3] cursor-ew-resize"
+              />
+            </div>
+          ) : (
+            /* eslint-disable-next-line @next/next/no-img-element */
+            <img
+              src={image.dataUrl}
+              alt={productName}
+              referrerPolicy="no-referrer"
+              className="max-h-[72vh] w-auto object-contain rounded-[6px]"
+            />
+          )}
+
+          {anchorCompareDataUrl && !image.isSourceView && !isSvg ? (
+            <button
+              type="button"
+              onClick={() => setCompareMode((prev) => !prev)}
+              className={cn(
+                'absolute left-3 top-3 z-20 inline-flex h-8 items-center gap-1.5 rounded-[6px] border px-2.5 text-[11px] font-medium backdrop-blur-sm cursor-pointer',
+                compareMode
+                  ? 'border-[#0070f3] bg-[#0070f3] text-white'
+                  : 'border-[var(--border)] bg-[var(--card)]/90 text-[var(--foreground)] hover:border-[var(--border-hover)]'
+              )}
+            >
+              <Columns2 className="h-3.5 w-3.5" />
+              <span>{compareMode ? 'Exit Compare' : 'Compare vs Anchor'}</span>
+            </button>
+          ) : null}
 
           {images.length > 1 ? (
             <>
@@ -333,6 +406,31 @@ export function LightboxModal({
                 <ImagePlus className="h-3.5 w-3.5" />
                 <span>Use as reference</span>
               </Button>
+            ) : null}
+
+            {onCreateMultiView ? (
+              <span
+                className="block"
+                title={
+                  isSvg
+                    ? 'Multi-view is not available for SVG results — use a PNG or JPEG image.'
+                    : 'Generate consistent angles of this product'
+                }
+              >
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={isSvg}
+                  className="w-full"
+                  onClick={() => {
+                    onOpenChange(false);
+                    onCreateMultiView(image);
+                  }}
+                >
+                  <Layers className="h-3.5 w-3.5" />
+                  <span>Create multi-view</span>
+                </Button>
+              </span>
             ) : null}
           </div>
         </div>

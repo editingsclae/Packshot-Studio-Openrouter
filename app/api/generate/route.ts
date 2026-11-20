@@ -3,11 +3,16 @@ import { z } from 'zod';
 import { findModelById, OFFLINE_FALLBACK_MODELS } from '@/lib/models';
 import {
   authorizeSpend,
+  capQualityForUsageModel,
   ENHANCE_ESTIMATE_USD,
   estimateImageRequestCostUsd,
+  getObservedModelCostUsd,
   isEnhancerModelAllowed,
   isImageModelAllowed,
+  isMissingSharedBudgetStoreOnVercel,
+  recordObservedModelCostUsd,
   recordSpend,
+  UNKNOWN_PAID_ESTIMATE_PER_IMAGE_USD,
 } from '@/lib/budget';
 import {
   discoverNormalizedModels,
@@ -114,6 +119,20 @@ export async function POST(req: NextRequest) {
     findModelById(models, input.model) ??
     findModelById(OFFLINE_FALLBACK_MODELS, input.model);
 
+  const isFreeImageModel =
+    modelSpec?.tier === 'free' || input.model.endsWith(':free');
+  const isPaidModel = !isFreeImageModel;
+
+  if (isPaidModel && isMissingSharedBudgetStoreOnVercel()) {
+    return NextResponse.json(
+      {
+        error:
+          'Paid models require a shared budget store (UPSTASH_REDIS_REST_URL) when running on Vercel.',
+      },
+      { status: 503 }
+    );
+  }
+
   // Reject resolution/quality values unsupported by this model's supported_parameters
   if (input.resolution && input.resolution !== 'auto') {
     if (!modelSpec || !modelSpec.supportedParams.includes('resolution')) {
@@ -161,9 +180,16 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const shouldEnhance = Boolean(input.enhance && !input.promptEditedManually);
+  const effectiveQuality = capQualityForUsageModel(input.quality, modelSpec);
+
   const enhancerModel =
     process.env.OPENROUTER_ENHANCER_MODEL?.trim() || 'openai/gpt-4o-mini';
+  const enhanceBlockedByVercel =
+    isMissingSharedBudgetStoreOnVercel() && !enhancerModel.endsWith(':free');
+  const shouldEnhance = Boolean(
+    input.enhance && !input.promptEditedManually && !enhanceBlockedByVercel
+  );
+
   if (shouldEnhance && !isEnhancerModelAllowed(enhancerModel)) {
     return NextResponse.json(
       {
@@ -173,11 +199,17 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const isUsageBasedPaid = isPaidModel && modelSpec?.priceUnit !== 'image';
+  const observedMaxCostUsd = isUsageBasedPaid
+    ? await getObservedModelCostUsd(input.model)
+    : null;
+
   const estimatedRequestUsd = estimateImageRequestCostUsd({
     modelId: input.model,
     modelSpec,
     variations: input.variations,
     includeEnhance: shouldEnhance,
+    observedMaxCostUsd,
   });
 
   const authz = await authorizeSpend(estimatedRequestUsd);
@@ -219,7 +251,7 @@ export async function POST(req: NextRequest) {
       prompt: promptUsed,
       aspectRatio: input.aspectRatio,
       resolution: input.resolution,
-      quality: input.quality,
+      quality: effectiveQuality,
       background: input.background,
       seed,
       outputFormat: input.outputFormat,
@@ -299,18 +331,24 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const hasReportedCost = images.some((img) => typeof img.cost === 'number');
-  const reportedTotal = images.reduce(
-    (sum, img) => sum + (typeof img.cost === 'number' ? img.cost : 0),
-    0
-  );
-  const isPaidModel =
-    (modelSpec?.tier ?? (input.model.endsWith(':free') ? 'free' : 'paid')) === 'paid';
+  const numericImageCosts = images
+    .map((img) => img.cost)
+    .filter((c): c is number => typeof c === 'number' && Number.isFinite(c));
+  const hasReportedCost = numericImageCosts.length > 0;
+  const reportedTotal = numericImageCosts.reduce((sum, c) => sum + c, 0);
+
+  if (isUsageBasedPaid && numericImageCosts.length > 0) {
+    const maxPerImageCost = Math.max(...numericImageCosts);
+    if (maxPerImageCost > 0) {
+      await recordObservedModelCostUsd(input.model, maxPerImageCost);
+    }
+  }
+
   const fallbackUnit =
     modelSpec?.priceUnit === 'image' && typeof modelSpec.priceUsd === 'number'
       ? modelSpec.priceUsd
       : isPaidModel
-        ? 0.05
+        ? Math.max(observedMaxCostUsd ?? 0, UNKNOWN_PAID_ESTIMATE_PER_IMAGE_USD)
         : 0;
   const totalCost = hasReportedCost
     ? reportedTotal
@@ -330,3 +368,4 @@ export async function POST(req: NextRequest) {
     errors,
   });
 }
+

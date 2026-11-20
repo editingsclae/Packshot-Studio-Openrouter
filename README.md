@@ -45,3 +45,34 @@ An AI ecommerce product photography studio built with Next.js (App Router), Type
    npm run build
    npm start
    ```
+
+## Deployment
+
+### Environment Variables
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `OPENROUTER_API_KEY` | Yes | — | Server-side OpenRouter API key for `/api/generate` and `/api/enhance`. |
+| `APP_PASSWORD` | Yes (prod) | — | Shared access-gate password for `/login`. Production refuses requests (`503`) if unset. |
+| `APP_SESSION_SECRET` | Recommended | `APP_PASSWORD` | Dedicated HMAC key material for signing `httpOnly` session cookies (`lib/auth.ts`). Falls back to `APP_PASSWORD` if omitted. |
+| `ALLOWED_MODELS` | No | Recommended + free Recraft | Comma-separated allowlist of OpenRouter image model IDs (`*` allows all discovered models). |
+| `MAX_REQUEST_USD` | No | `0.50` | Maximum estimated USD allowed per generation or enhance request (`402` if exceeded). |
+| `MAX_DAILY_USD` | No | `5` | Cumulative UTC daily spend cap in USD across requests (`402` if exceeded). |
+| `ALLOW_HIGH_QUALITY` | No | `false` | When `false`, caps `quality` at `medium` server-side for models whose `priceUnit` is not `"image"`. |
+| `UPSTASH_REDIS_REST_URL` | Required on Vercel for paid models | — | Upstash Redis REST endpoint for shared daily spend and per-model max observed cost tracking. |
+| `UPSTASH_REDIS_REST_TOKEN` | Required with URL | — | Upstash Redis REST bearer token paired with `UPSTASH_REDIS_REST_URL`. |
+| `TRUSTED_PROXY` | No | `false` | Set to `true` when running behind a trusted reverse proxy so rate limiting reads the last `X-Forwarded-For` entry (auto-trusted when `VERCEL` is set; otherwise rate limits share a `"direct"` bucket). |
+
+### Reverse Proxy Configuration
+
+When self-hosting behind nginx with `TRUSTED_PROXY=true`, configure nginx to overwrite or append the true client address:
+
+```nginx
+proxy_set_header X-Forwarded-For $remote_addr;
+```
+
+### Vercel Limits & Serverless Notes
+
+- **Shared budget store (`503` guard):** When `VERCEL` is set without `UPSTASH_REDIS_REST_URL`, the server logs a startup warning and refuses paid model requests with HTTP `503` so daily spend limits cannot be bypassed across ephemeral serverless instances. Free `:free` models remain available.
+- **Request & response body size (`4.5 MB` limit):** Vercel Serverless Functions enforce a hard `4.5 MB` request/response payload cap. The client compresses non-transparent references to JPEG under `3 MB` (max `4` references, `4 MB` Zod cap) and dispatches one `POST /api/generate` call per image (`variations: 1`, concurrency `4`), keeping responses small. When attaching multiple high-resolution references on Vercel, keep the combined JSON body under `4.5 MB`.
+- **Execution duration:** `/api/generate` declares `export const maxDuration = 300` and `/api/enhance` declares `export const maxDuration = 60`. Vercel Hobby plans cap function execution shorter than `300s` (use Vercel Pro with Fluid Compute or choose faster models when running slow image endpoints).

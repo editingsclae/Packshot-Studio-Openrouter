@@ -9,6 +9,7 @@ import {
   Heart,
   ImagePlus,
   Info,
+  Layers,
   Maximize2,
   RefreshCw,
   RotateCcw,
@@ -70,6 +71,7 @@ interface ImageResultCardProps {
   onOpenAlignModal?: () => void;
   onRevertAlignment?: () => void;
   onUseAsReference?: () => void;
+  onCreateMultiView?: () => void;
   isGenerating: boolean;
 }
 
@@ -91,6 +93,7 @@ export function ImageResultCard({
   onOpenAlignModal,
   onRevertAlignment,
   onUseAsReference,
+  onCreateMultiView,
   isGenerating,
 }: ImageResultCardProps) {
   const [downloadingFormat, setDownloadingFormat] = useState<
@@ -321,7 +324,9 @@ export function ImageResultCard({
         ) : null}
 
         {/* Marketplace Auto-Crop & Reference Utility Row */}
-        {(!isSvg && (onAutoCenter || onOpenAlignModal)) || onUseAsReference ? (
+        {(!isSvg && (onAutoCenter || onOpenAlignModal)) ||
+        onUseAsReference ||
+        onCreateMultiView ? (
           <div className="flex flex-wrap items-center justify-between gap-2 rounded-[8px] border border-[var(--border)] bg-[var(--surface)]/70 px-2.5 py-1.5">
             <span className="text-[11px] text-[var(--muted-foreground)]">
               {!isSvg && image.alignedLabel ? (
@@ -388,6 +393,26 @@ export function ImageResultCard({
                   <ImagePlus className="h-3 w-3" />
                   <span>Use as reference</span>
                 </button>
+              ) : null}
+
+              {onCreateMultiView ? (
+                <span
+                  title={
+                    isSvg
+                      ? 'Multi-view is not available for SVG results — use a PNG or JPEG image.'
+                      : 'Create consistent views of this product from other angles'
+                  }
+                >
+                  <button
+                    type="button"
+                    disabled={isGenerating || isSvg}
+                    onClick={onCreateMultiView}
+                    className="inline-flex h-6 items-center gap-1 rounded-[5px] border border-[var(--border)] bg-[var(--card)] px-2 text-[11px] font-medium text-[var(--foreground)] transition-colors hover:border-[var(--border-hover)] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap"
+                  >
+                    <Layers className="h-3 w-3" />
+                    <span>Create multi-view</span>
+                  </button>
+                </span>
               ) : null}
             </div>
           </div>

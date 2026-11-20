@@ -9,6 +9,43 @@ import type { ProductBrief } from './prompt-engine';
 import type { ShotPresetId } from './presets';
 import type { PackshotCheckResult } from './packshot-check';
 
+export type MultiViewId =
+  | 'front'
+  | 'front-right-34'
+  | 'right'
+  | 'back-right-34'
+  | 'back'
+  | 'back-left-34'
+  | 'left'
+  | 'front-left-34'
+  | 'top'
+  | 'bottom'
+  | 'detail';
+
+export interface MultiViewConsistencyResult {
+  colorDriftScore: number;
+  hasColorDrift: boolean;
+  heightRatioDiffPct: number;
+  hasSizeMismatch: boolean;
+  anchorHeightPct: number;
+  targetHeightPct: number;
+}
+
+export interface MultiViewSetMeta {
+  setId: string;
+  sourceImageId: string;
+  sourceImageDataUrl: string;
+  sourceViewId: MultiViewId;
+  selectedViewIds: MultiViewId[];
+  shotStyleId: ShotPresetId;
+  hiddenSidesNotes?: Record<string, string>;
+  hiddenSidesPhotos?: Record<string, string>;
+  useSameSeed: boolean;
+  sharedSeed?: number;
+  consistencyBoost: boolean;
+  extraReferenceViewIds?: MultiViewId[];
+}
+
 export interface GeneratedImageItem {
   id: string;
   dataUrl: string;
@@ -21,6 +58,12 @@ export interface GeneratedImageItem {
   packshotCheck?: PackshotCheckResult;
   degraded?: string[];
   favorite?: boolean;
+  viewId?: MultiViewId;
+  viewLabel?: string;
+  isSourceView?: boolean;
+  approved?: boolean;
+  extraNote?: string;
+  consistency?: MultiViewConsistencyResult;
 }
 
 export interface GenerationRecord {
@@ -38,6 +81,7 @@ export interface GenerationRecord {
   totalCost: number;
   actualCost?: number | null;
   totalDurationMs: number;
+  multiViewSet?: MultiViewSetMeta;
 }
 
 export interface StudioSettings {

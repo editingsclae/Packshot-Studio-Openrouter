@@ -62,13 +62,25 @@ export async function verifyPasswordConstantTime(
   );
 }
 
+export function getSessionSecret(fallbackPassword?: string): string {
+  const dedicated = process.env.APP_SESSION_SECRET?.trim();
+  if (dedicated) {
+    return dedicated;
+  }
+  return fallbackPassword ?? process.env.APP_PASSWORD ?? '';
+}
+
 export async function signSessionToken(
-  appPassword: string,
+  appPassword?: string,
   ttlSeconds: number = SESSION_TTL_SECONDS
 ): Promise<string> {
+  const secret = getSessionSecret(appPassword);
+  if (!secret) {
+    throw new Error('Cannot sign session token without APP_SESSION_SECRET or APP_PASSWORD.');
+  }
   const expiresAt = Math.floor(Date.now() / 1000) + ttlSeconds;
   const payload = `v1.${expiresAt}`;
-  const key = await importHmacKey(appPassword);
+  const key = await importHmacKey(secret);
   const signature = await crypto.subtle.sign(
     'HMAC',
     key,
@@ -79,9 +91,10 @@ export async function signSessionToken(
 
 export async function verifySessionToken(
   token: string | undefined | null,
-  appPassword: string
+  appPassword?: string
 ): Promise<boolean> {
-  if (!token || !appPassword) return false;
+  const secret = getSessionSecret(appPassword);
+  if (!token || !secret) return false;
   const parts = token.split('.');
   if (parts.length !== 3) return false;
 
@@ -96,10 +109,11 @@ export async function verifySessionToken(
   const providedSig = fromBase64Url(sigRaw);
   if (!providedSig) return false;
 
-  const key = await importHmacKey(appPassword);
+  const key = await importHmacKey(secret);
   const expectedSig = new Uint8Array(
     await crypto.subtle.sign('HMAC', key, encoder.encode(`${version}.${expiresRaw}`))
   );
 
   return constantTimeEqualBytes(providedSig, expectedSig);
 }
+
