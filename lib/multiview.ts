@@ -22,7 +22,7 @@ export const ALL_MULTIVIEW_SPECS: MultiViewSpec[] = [
     slug: 'front',
     angleDeg: 0,
     cameraOrbitDesc:
-      'the direct straight-on front view, eye-level, 85mm lens, matching distance and scale on the upright stationary product',
+      'from the direct straight-on front view at eye level, 85mm lens, matching distance and scale',
     isTurnable: true,
   },
   {
@@ -32,7 +32,7 @@ export const ALL_MULTIVIEW_SPECS: MultiViewSpec[] = [
     slug: '3-4-front-right',
     angleDeg: 45,
     cameraOrbitDesc:
-      'camera orbited 45 degrees right of front view, eye-level, 85mm lens, matching distance and scale on the upright stationary product',
+      'with the camera orbited 45 degrees right of the front view at eye level, 85mm lens, matching distance and scale',
     isTurnable: true,
   },
   {
@@ -42,7 +42,7 @@ export const ALL_MULTIVIEW_SPECS: MultiViewSpec[] = [
     slug: 'right',
     angleDeg: 90,
     cameraOrbitDesc:
-      'camera orbited 90 degrees right of front view, eye-level, 85mm lens, matching distance and scale on the upright stationary product',
+      'with the camera orbited 90 degrees right of the front view at eye level, 85mm lens, matching distance and scale',
     isTurnable: true,
   },
   {
@@ -52,7 +52,7 @@ export const ALL_MULTIVIEW_SPECS: MultiViewSpec[] = [
     slug: '3-4-back-right',
     angleDeg: 135,
     cameraOrbitDesc:
-      'camera orbited 135 degrees right of front view, eye-level, 85mm lens, matching distance and scale on the upright stationary product',
+      'with the camera orbited 135 degrees right of the front view at eye level, 85mm lens, matching distance and scale',
     isTurnable: true,
   },
   {
@@ -62,7 +62,7 @@ export const ALL_MULTIVIEW_SPECS: MultiViewSpec[] = [
     slug: 'back',
     angleDeg: 180,
     cameraOrbitDesc:
-      'camera orbited 180 degrees to rear view, eye-level, 85mm lens, matching distance and scale on the upright stationary product',
+      'with the camera orbited 180 degrees to the rear view at eye level, 85mm lens, matching distance and scale',
     isTurnable: true,
   },
   {
@@ -72,7 +72,7 @@ export const ALL_MULTIVIEW_SPECS: MultiViewSpec[] = [
     slug: '3-4-back-left',
     angleDeg: 225,
     cameraOrbitDesc:
-      'camera orbited 135 degrees left of front view, eye-level, 85mm lens, matching distance and scale on the upright stationary product',
+      'with the camera orbited 135 degrees left of the front view at eye level, 85mm lens, matching distance and scale',
     isTurnable: true,
   },
   {
@@ -82,7 +82,7 @@ export const ALL_MULTIVIEW_SPECS: MultiViewSpec[] = [
     slug: 'left',
     angleDeg: 270,
     cameraOrbitDesc:
-      'camera orbited 90 degrees left of front view, eye-level, 85mm lens, matching distance and scale on the upright stationary product',
+      'with the camera orbited 90 degrees left of the front view at eye level, 85mm lens, matching distance and scale',
     isTurnable: true,
   },
   {
@@ -92,7 +92,7 @@ export const ALL_MULTIVIEW_SPECS: MultiViewSpec[] = [
     slug: '3-4-front-left',
     angleDeg: 315,
     cameraOrbitDesc:
-      'camera orbited 45 degrees left of front view, eye-level, 85mm lens, matching distance and scale on the upright stationary product',
+      'with the camera orbited 45 degrees left of the front view at eye level, 85mm lens, matching distance and scale',
     isTurnable: true,
   },
   {
@@ -102,7 +102,7 @@ export const ALL_MULTIVIEW_SPECS: MultiViewSpec[] = [
     slug: 'top',
     angleDeg: null,
     cameraOrbitDesc:
-      'camera orbited 90 degrees overhead looking straight down at the top, 85mm lens, matching distance and scale',
+      'with the camera orbited 90 degrees overhead looking straight down at the top, 85mm lens, matching distance and scale',
     isTurnable: false,
   },
   {
@@ -112,7 +112,7 @@ export const ALL_MULTIVIEW_SPECS: MultiViewSpec[] = [
     slug: 'bottom',
     angleDeg: null,
     cameraOrbitDesc:
-      'camera orbited underneath showing the bottom base of the same product, 85mm lens, matching distance and scale',
+      'with the camera orbited underneath showing the bottom base of the product, 85mm lens, matching distance and scale',
     isTurnable: false,
   },
   {
@@ -122,7 +122,7 @@ export const ALL_MULTIVIEW_SPECS: MultiViewSpec[] = [
     slug: 'detail',
     angleDeg: null,
     cameraOrbitDesc:
-      'tight close-up macro detail highlighting surface texture, stitching, hardware or label finish of the same product',
+      'in a tight macro close-up highlighting surface texture, stitching, hardware or label finish',
     isTurnable: false,
   },
 ];
@@ -185,12 +185,30 @@ export function sortViewsCanonical(viewIds: MultiViewId[]): MultiViewId[] {
   );
 }
 
-function stripHexFromPrompt(input: string): string {
+const MAX_MULTIVIEW_PROMPT_CHARS = 1100;
+
+function cleanPromptText(input: string): string {
   return input
     .replace(/\(#?[0-9a-fA-F]{6}\)/g, '')
     .replace(/#[0-9a-fA-F]{3,8}\b/g, '')
+    .replace(/\b(\d+)\s+percent\b/gi, '$1%')
     .replace(/\s{2,}/g, ' ')
     .trim();
+}
+
+function toWholeSentence(raw: string): string {
+  const cleaned = cleanPromptText(raw).replace(/[.;:,\s]+$/, '');
+  return cleaned ? `${cleaned}.` : '';
+}
+
+function trimAtWordBoundary(input: string, maxLen: number): string {
+  const cleaned = cleanPromptText(input).replace(/[.;:,\s]+$/, '');
+  if (!cleaned) return '';
+  if (cleaned.length <= maxLen) return cleaned;
+  const cut = cleaned.slice(0, maxLen + 1);
+  const lastSpace = cut.lastIndexOf(' ');
+  const whole = lastSpace > 0 ? cut.slice(0, lastSpace) : cleaned.slice(0, maxLen);
+  return whole.replace(/[.;:,\s]+$/, '');
 }
 
 export interface BuildMultiViewPromptOptions {
@@ -200,8 +218,9 @@ export interface BuildMultiViewPromptOptions {
 }
 
 /**
- * Builds a concise (<= 700 chars) multi-view generation prompt describing the view
+ * Builds a concise (<= 1100 chars) multi-view generation prompt describing the view
  * as a camera orbit around a fixed, upright, stationary product.
+ * Style sentences are kept whole in importance order: background, composition, lighting.
  */
 export function buildMultiViewPrompt(
   viewId: MultiViewId,
@@ -211,47 +230,46 @@ export function buildMultiViewPrompt(
   const preset = getShotPreset(options.shotStyleId);
 
   const coreHead =
-    `Using the provided product photo(s), show the exact same product photographed from ${spec.cameraOrbitDesc}. ` +
-    `Keep the product's exact shape, proportions, colors, materials, finish, hardware, logos and label text identical to the reference. ` +
-    `Do not redesign, restyle or add parts. Anything not visible in the reference should continue the existing design language simply and neutrally, with no new logos, text or features.`;
-
-  const hiddenClean = stripHexFromPrompt(options.hiddenSideNote || '');
-  const correctionClean = stripHexFromPrompt(options.correctionNote || '');
+    `Using the provided photo(s), show this exact product photographed ${spec.cameraOrbitDesc}. ` +
+    `Keep shape, proportions, colors, materials, finish, hardware, logos and text identical; do not redesign or add parts. ` +
+    `Unseen areas continue the design simply and neutrally with no new logos or text.`;
 
   const userNotes: string[] = [];
-  if (hiddenClean) {
-    const trimmed = hiddenClean.slice(0, 80).replace(/[.]+$/, '');
-    userNotes.push(`Side detail: ${trimmed}.`);
+  const hiddenTrimmed = trimAtWordBoundary(options.hiddenSideNote || '', 140);
+  if (hiddenTrimmed) {
+    userNotes.push(`Side detail: ${hiddenTrimmed}.`);
   }
-  if (correctionClean) {
-    const trimmed = correctionClean.slice(0, 80).replace(/[.]+$/, '');
-    userNotes.push(`Correction: ${trimmed}.`);
+  const correctionTrimmed = trimAtWordBoundary(options.correctionNote || '', 140);
+  if (correctionTrimmed) {
+    userNotes.push(`Correction: ${correctionTrimmed}.`);
   }
 
-  const rawBg = stripHexFromPrompt(preset.background).replace(/\.+$/, '');
-  const rawLight = stripHexFromPrompt(preset.lighting).replace(/\.+$/, '');
-  const rawComp = stripHexFromPrompt(preset.composition).replace(/\.+$/, '');
-  const styleFull = `${rawBg}. ${rawLight}. ${rawComp}.`;
+  // Whole sentences ordered by importance: background, composition, lighting
+  const styleSentences = [
+    toWholeSentence(preset.background),
+    toWholeSentence(preset.composition),
+    toWholeSentence(preset.lighting),
+  ].filter(Boolean);
+
   const tail = 'Single product, no people, no watermark, no extra text.';
 
-  const baseOnly = [coreHead, ...userNotes, tail]
-    .join(' ')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
-
-  const styleBudget = Math.max(0, 700 - baseOnly.length - 1);
-  if (styleBudget >= 24) {
-    const clippedStyle =
-      styleFull.length <= styleBudget
-        ? styleFull
-        : `${styleFull.slice(0, styleBudget - 1).trim().replace(/[.,;:\s]+$/, '')}.`;
-    return [coreHead, ...userNotes, clippedStyle, tail]
+  const chosenStyle: string[] = [];
+  for (const sentence of styleSentences) {
+    const candidate = [coreHead, ...userNotes, ...chosenStyle, sentence, tail]
       .join(' ')
       .replace(/\s{2,}/g, ' ')
       .trim();
+    if (candidate.length <= MAX_MULTIVIEW_PROMPT_CHARS) {
+      chosenStyle.push(sentence);
+    } else {
+      break;
+    }
   }
 
-  return baseOnly.slice(0, 700).trim();
+  return [coreHead, ...userNotes, ...chosenStyle, tail]
+    .join(' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
 }
 
 /**
