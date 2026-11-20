@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { isImageModelAllowed } from '@/lib/budget';
 import { discoverNormalizedModels } from '@/lib/openrouter';
 import { checkRateLimit, getClientIp } from '@/lib/rate-limit';
 
@@ -20,10 +21,14 @@ export async function GET(req: NextRequest) {
     req.nextUrl.searchParams.get('bypassCache') === '1';
 
   const result = await discoverNormalizedModels({ bypassCache });
+  const annotatedModels = result.models.map((m) => ({
+    ...m,
+    allowed: isImageModelAllowed(m.id),
+  }));
 
   return NextResponse.json(
     {
-      models: result.models,
+      models: annotatedModels,
       source: result.source,
       updatedAt: result.updatedAt,
       ...(result.error ? { error: result.error } : {}),

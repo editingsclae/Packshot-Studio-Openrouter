@@ -360,8 +360,9 @@ export function ModelSelector({
                         </div>
                         {group.models.map((m) => {
                           const isSelected = m.id === selectedModelId;
+                          const notAllowed = m.allowed === false;
                           const isDisabled =
-                            m.requiresReference && inputMode === 'text';
+                            notAllowed || (m.requiresReference && inputMode === 'text');
                           const isRecommended = isRecommendedProductModel(m.id);
                           const mStats = costStats?.[m.id];
 
@@ -372,6 +373,7 @@ export function ModelSelector({
                               role="option"
                               aria-selected={isSelected}
                               disabled={isDisabled}
+                              title={notAllowed ? 'Not enabled on this server' : undefined}
                               onClick={() => {
                                 if (isDisabled) return;
                                 onSelectModel(m.id);
@@ -395,12 +397,18 @@ export function ModelSelector({
                                   <div className="truncate text-[12px] font-medium">
                                     {m.name}
                                   </div>
-                                  {(isRecommended ||
+                                  {(notAllowed ||
+                                    isRecommended ||
                                     m.requiresReference ||
                                     m.supportsReference ||
                                     m.supportsSvg ||
                                     m.badge) ? (
                                     <div className="flex flex-wrap items-center gap-1">
+                                      {notAllowed ? (
+                                        <span className="rounded-[4px] border border-[var(--border)] bg-[var(--background)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--muted-foreground)]">
+                                          Not enabled on this server
+                                        </span>
+                                      ) : null}
                                       {isRecommended ? (
                                         <span className="rounded-[4px] border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-500">
                                           Recommended for products

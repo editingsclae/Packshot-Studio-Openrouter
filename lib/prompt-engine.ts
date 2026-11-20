@@ -59,6 +59,22 @@ export function getDetailsToLockPlaceholder(category: ProductCategoryId): string
   }
 }
 
+export function createEmptyBrief(
+  category: ProductCategoryId = 'home-furniture'
+): ProductBrief {
+  return {
+    name: '',
+    category,
+    materialFinish: '',
+    colors: [],
+    useBackgroundColor: false,
+    backgroundColor: '#FFFFFF',
+    keyFeatures: '',
+    detailsToLock: '',
+    onProductTexts: [],
+  };
+}
+
 export const DEFAULT_BRIEF: ProductBrief = {
   name: 'Matte Black Stainless Steel Pour-Over Kettle',
   category: 'home-furniture',

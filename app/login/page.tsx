@@ -1,25 +1,59 @@
 'use client';
 
-import React, { Suspense, useActionState, useState } from 'react';
+import React, { Suspense, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { AlertCircle, ArrowRight, Eye, EyeOff, Lock } from 'lucide-react';
-import { loginAction, type LoginActionState } from './actions';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 
-const initialState: LoginActionState = {};
-
 function LoginForm() {
   const searchParams = useSearchParams();
   const nextPath = searchParams.get('next') || '/';
-  const [state, formAction, isPending] = useActionState(loginAction, initialState);
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [isPending, setIsPending] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
 
-  return (
-    <form action={formAction} className="space-y-4">
-      <input type="hidden" name="next" value={nextPath} />
+  async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (isPending) return;
+    setError(null);
+    setIsPending(true);
 
+    try {
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password, next: nextPath }),
+      });
+
+      let data: { ok?: boolean; redirectTo?: string; error?: string } = {};
+      try {
+        data = (await res.json()) as {
+          ok?: boolean;
+          redirectTo?: string;
+          error?: string;
+        };
+      } catch {
+        // Non-JSON error response
+      }
+
+      if (!res.ok || !data.ok) {
+        setError(data.error || 'Sign-in failed. Please try again.');
+        setIsPending(false);
+        return;
+      }
+
+      window.location.assign(data.redirectTo || '/');
+    } catch {
+      setError('Unable to reach the server. Please try again.');
+      setIsPending(false);
+    }
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-4">
       <div className="space-y-1.5">
         <Label htmlFor="studio-password">Shared password</Label>
         <div className="relative">
@@ -29,6 +63,8 @@ function LoginForm() {
             type={showPassword ? 'text' : 'password'}
             autoComplete="current-password"
             placeholder="Enter access password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
             autoFocus
             required
             className="pr-10"
@@ -48,13 +84,13 @@ function LoginForm() {
         </div>
       </div>
 
-      {state.error ? (
+      {error ? (
         <div
           role="alert"
           className="flex items-center gap-2 rounded-[8px] border border-red-500/40 bg-red-500/10 px-3 py-2 text-[12px] text-red-400"
         >
           <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-          <span>{state.error}</span>
+          <span>{error}</span>
         </div>
       ) : null}
 

@@ -140,19 +140,26 @@ export function MultiViewModal({
     [models]
   );
 
+  const allowedRefCapableModels = useMemo(
+    () => refCapableModels.filter((m) => m.allowed !== false),
+    [refCapableModels]
+  );
+
   const [selectedModelId, setSelectedModelId] = useState<string>(() => {
     const candidate = models.find((m) => m.id === initialModelId);
-    if (candidate?.supportsReference) return candidate.id;
-    return refCapableModels[0]?.id ?? initialModelId;
+    if (candidate?.supportsReference && candidate.allowed !== false) return candidate.id;
+    return allowedRefCapableModels[0]?.id ?? refCapableModels[0]?.id ?? initialModelId;
   });
 
   const activeModel = useMemo(() => {
     return (
+      allowedRefCapableModels.find((m) => m.id === selectedModelId) ??
+      allowedRefCapableModels[0] ??
       refCapableModels.find((m) => m.id === selectedModelId) ??
       refCapableModels[0] ??
       models[0]
     );
-  }, [refCapableModels, selectedModelId, models]);
+  }, [allowedRefCapableModels, refCapableModels, selectedModelId, models]);
 
   const maxRefs = Math.min(4, Math.max(0, activeModel?.maxReferences ?? 0));
   const supportsMultiRef = maxRefs >= 2;
@@ -1320,11 +1327,20 @@ export function MultiViewModal({
                   <SelectValue placeholder="Select model" />
                 </SelectTrigger>
                 <SelectContent>
-                  {refCapableModels.map((m) => (
-                    <SelectItem key={m.id} value={m.id}>
-                      {m.name} ({formatModelPrice(m, costStats[m.id])} · max {m.maxReferences} refs)
-                    </SelectItem>
-                  ))}
+                  {refCapableModels.map((m) => {
+                    const notAllowed = m.allowed === false;
+                    return (
+                      <SelectItem
+                        key={m.id}
+                        value={m.id}
+                        disabled={notAllowed}
+                        className={notAllowed ? 'opacity-45' : undefined}
+                      >
+                        {m.name} ({formatModelPrice(m, costStats[m.id])} · max {m.maxReferences} refs
+                        {notAllowed ? ' · Not enabled on this server' : ''})
+                      </SelectItem>
+                    );
+                  })}
                 </SelectContent>
               </Select>
             </div>

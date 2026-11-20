@@ -39,9 +39,45 @@ export interface NormalizedImageModel {
   supportedBackgrounds?: string[];
   supportedOutputFormats?: string[];
   badge?: string;
+  /** Whether this model is permitted by server ALLOWED_MODELS allowlist (set by /api/models). */
+  allowed?: boolean;
+}
+
+export function isModelAllowed(model?: NormalizedImageModel | null): boolean {
+  return Boolean(model && model.allowed !== false);
+}
+
+export type QualityModeId = 'draft' | 'standard' | 'premium';
+
+export interface QualityModeConfig {
+  id: QualityModeId;
+  label: string;
+  subtitle: string;
+  candidateModelIds: readonly string[];
 }
 
 export const DEFAULT_FREE_MODEL_ID = 'recraft/recraft-v4.1-flash-v2:free';
+
+export const QUALITY_MODE_CONFIGS: readonly QualityModeConfig[] = [
+  {
+    id: 'draft',
+    label: 'Draft',
+    subtitle: 'Free or lowest cost',
+    candidateModelIds: [DEFAULT_FREE_MODEL_ID, 'recraft/recraft-v4.1-flash'],
+  },
+  {
+    id: 'standard',
+    label: 'Standard',
+    subtitle: 'Recommended default',
+    candidateModelIds: ['recraft/recraft-v4.1-utility'],
+  },
+  {
+    id: 'premium',
+    label: 'Premium',
+    subtitle: 'Best quality',
+    candidateModelIds: ['openai/gpt-image-2', 'google/gemini-nano-banana-2.1'],
+  },
+];
 
 export const RECOMMENDED_PRODUCT_MODEL_IDS: readonly string[] = [
   'recraft/recraft-v4.1-utility',
@@ -366,6 +402,29 @@ export function groupModelsByProvider(
     });
 }
 
+export function formatPerImageShortPrice(
+  model: NormalizedImageModel | null | undefined,
+  costStats?: ModelCostSummary | null
+): string {
+  if (!model) return 'Unavailable';
+  if (model.tier === 'free') return 'Free';
+  if (model.priceUnit === 'image' && model.priceUsd !== null) {
+    if (model.priceUsd >= 0.01) {
+      return `~$${model.priceUsd.toFixed(2)}`;
+    }
+    return `~$${model.priceUsd.toFixed(3).replace(/0+$/, '')}`;
+  }
+  if (costStats && costStats.count > 0) {
+    return `~${formatUsdCompact(costStats.averageActualCost)}`;
+  }
+  return 'Cost unknown';
+}
+
+function filterAllowedPool(models: NormalizedImageModel[]): NormalizedImageModel[] {
+  const allowed = models.filter((m) => m.allowed !== false);
+  return allowed.length > 0 ? allowed : models;
+}
+
 /**
  * Picks the cheapest paid model with an exact per-image price first,
  * falling back to any paid model only if no exact per-image model exists.
@@ -374,8 +433,9 @@ export function getCheapestPaidModel(
   models: NormalizedImageModel[],
   inputMode: 'text' | 'photo' = 'text'
 ): NormalizedImageModel | null {
-  const eligiblePaid = models.filter(
-    (m) => m.tier === 'paid' && (inputMode === 'photo' || !m.requiresReference)
+  const allowedPool = filterAllowedPool(models);
+  const eligiblePaid = allowedPool.filter(
+    (m) => m.tier === 'paid' && (inputMode === 'photo' ? m.supportsReference : !m.requiresReference)
   );
   const exactPerImage = sortModelsByPriceAsc(
     eligiblePaid.filter((m) => m.priceUnit === 'image' && m.priceUsd !== null)
@@ -385,7 +445,7 @@ export function getCheapestPaidModel(
   const anyPaid = sortModelsByPriceAsc(eligiblePaid);
   if (anyPaid[0]) return anyPaid[0];
 
-  const allPaid = sortModelsByPriceAsc(models.filter((m) => m.tier === 'paid'));
+  const allPaid = sortModelsByPriceAsc(allowedPool.filter((m) => m.tier === 'paid'));
   return allPaid[0] ?? null;
 }
 
@@ -401,8 +461,9 @@ export function pickPreferredDefaultModel(
 ): NormalizedImageModel | null {
   const tier = options?.tier;
   const inputMode = options?.inputMode ?? 'text';
-  const eligible = models.filter(
-    (m) => inputMode === 'photo' || !m.requiresReference
+  const allowedPool = filterAllowedPool(models);
+  const eligible = allowedPool.filter(
+    (m) => (inputMode === 'photo' ? m.supportsReference : !m.requiresReference)
   );
 
   if (tier !== 'paid') {
@@ -424,7 +485,7 @@ export function pickPreferredDefaultModel(
   );
   if (utility) return utility;
 
-  return getCheapestPaidModel(models, inputMode) ?? eligible[0] ?? models[0] ?? null;
+  return getCheapestPaidModel(allowedPool, inputMode) ?? eligible[0] ?? allowedPool[0] ?? null;
 }
 
 /**
@@ -437,11 +498,14 @@ export function pickTierSwitchModel(
   tier: ModelTier,
   inputMode: 'text' | 'photo' = 'text'
 ): NormalizedImageModel | null {
-  const eligible = models.filter(
-    (m) => m.tier === tier && (inputMode === 'photo' || !m.requiresReference)
+  const allowedPool = filterAllowedPool(models);
+  const eligible = allowedPool.filter(
+    (m) =>
+      m.tier === tier &&
+      (inputMode === 'photo' ? m.supportsReference : !m.requiresReference)
   );
   const pool =
-    eligible.length > 0 ? eligible : models.filter((m) => m.tier === tier);
+    eligible.length > 0 ? eligible : allowedPool.filter((m) => m.tier === tier);
   if (pool.length === 0) return null;
 
   if (tier === 'paid') {
@@ -472,7 +536,8 @@ export function pickCheapestRecommendedReferenceModel(
   models: NormalizedImageModel[],
   preferredTier?: ModelTier
 ): NormalizedImageModel | null {
-  const refCapable = models.filter((m) => m.supportsReference);
+  const allowedPool = filterAllowedPool(models);
+  const refCapable = allowedPool.filter((m) => m.supportsReference);
   if (refCapable.length === 0) return null;
 
   const recommendedRef = sortModelsByPriceAsc(
@@ -493,6 +558,94 @@ export function pickCheapestRecommendedReferenceModel(
     if (freeRef[0]) return freeRef[0];
   }
   return sortModelsByPriceAsc(refCapable)[0] ?? null;
+}
+
+/**
+ * Resolves a Quality Mode ('draft' | 'standard' | 'premium') against available,
+ * server-allowed models and input mode ('photo' requires supportsReference).
+ * Skips unavailable or non-allowed models and falls back cleanly down the list.
+ */
+export function resolveQualityModeModel(
+  modeId: QualityModeId,
+  models: NormalizedImageModel[],
+  inputMode: 'text' | 'photo' = 'text'
+): NormalizedImageModel | null {
+  const eligible = models.filter(
+    (m) =>
+      m.allowed !== false &&
+      (inputMode === 'photo' ? m.supportsReference : !m.requiresReference)
+  );
+  if (eligible.length === 0) return null;
+
+  const config = QUALITY_MODE_CONFIGS.find((c) => c.id === modeId);
+  if (!config) return null;
+
+  if (modeId === 'draft') {
+    const freeRecraft =
+      eligible.find((m) => m.tier === 'free' && m.id === DEFAULT_FREE_MODEL_ID) ??
+      eligible.find((m) => m.tier === 'free' && m.provider === 'recraft');
+    if (freeRecraft) return freeRecraft;
+
+    const anyFree = eligible.find((m) => m.tier === 'free');
+    if (anyFree) return anyFree;
+
+    for (const cid of config.candidateModelIds) {
+      const match = eligible.find((m) => m.id === cid);
+      if (match) return match;
+    }
+
+    const exactPerImage = sortModelsByPriceAsc(
+      eligible.filter((m) => m.priceUnit === 'image' && m.priceUsd !== null)
+    );
+    if (exactPerImage[0]) return exactPerImage[0];
+
+    return sortModelsByPriceAsc(eligible)[0] ?? null;
+  }
+
+  if (modeId === 'standard') {
+    for (const cid of config.candidateModelIds) {
+      const match = eligible.find((m) => m.id === cid);
+      if (match) return match;
+    }
+    for (const recId of RECOMMENDED_PRODUCT_MODEL_IDS) {
+      const match = eligible.find((m) => m.id === recId);
+      if (match) return match;
+    }
+    const exactPaid = sortModelsByPriceAsc(
+      eligible.filter((m) => m.tier === 'paid' && m.priceUnit === 'image' && m.priceUsd !== null)
+    );
+    if (exactPaid[0]) return exactPaid[0];
+    return sortModelsByPriceAsc(eligible)[0] ?? null;
+  }
+
+  // Premium
+  for (const cid of config.candidateModelIds) {
+    const match = eligible.find((m) => m.id === cid);
+    if (match) return match;
+  }
+  for (const recId of RECOMMENDED_PRODUCT_MODEL_IDS) {
+    if (recId === 'recraft/recraft-v4.1-utility') continue;
+    const match = eligible.find((m) => m.id === recId);
+    if (match) return match;
+  }
+  const exactPaidDesc = sortModelsByPriceAsc(
+    eligible.filter((m) => m.tier === 'paid' && m.priceUnit === 'image' && m.priceUsd !== null)
+  );
+  return exactPaidDesc[exactPaidDesc.length - 1] ?? eligible[0] ?? null;
+}
+
+export function detectQualityModeForModel(
+  modelId: string,
+  models: NormalizedImageModel[],
+  inputMode: 'text' | 'photo' = 'text'
+): QualityModeId | null {
+  for (const cfg of QUALITY_MODE_CONFIGS) {
+    const resolved = resolveQualityModeModel(cfg.id, models, inputMode);
+    if (resolved?.id === modelId) {
+      return cfg.id;
+    }
+  }
+  return null;
 }
 
 export function findModelById(

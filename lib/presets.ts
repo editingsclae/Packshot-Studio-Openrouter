@@ -157,6 +157,7 @@ export type ShotPresetId =
 export interface ShotPresetSpec {
   id: ShotPresetId;
   name: string;
+  bestFor: string;
   shortDescription: string;
   defaultAspectRatio: AspectRatio;
   isWhiteBackground: boolean;
@@ -170,6 +171,7 @@ export const SHOT_PRESETS: ShotPresetSpec[] = [
   {
     id: 'marketplace-packshot',
     name: 'Marketplace Packshot',
+    bestFor: 'Amazon, Etsy, Shopify listings',
     shortDescription: 'Pure white #FFFFFF seamless, 85% fill, soft contact shadow',
     defaultAspectRatio: '1:1',
     isWhiteBackground: true,
@@ -183,6 +185,7 @@ export const SHOT_PRESETS: ShotPresetSpec[] = [
   {
     id: 'studio-hero',
     name: 'Studio Hero',
+    bestFor: 'Banners and landing pages',
     shortDescription: 'Colored seamless, softbox key, rim light & soft reflections',
     defaultAspectRatio: '4:5',
     isWhiteBackground: false,
@@ -196,6 +199,7 @@ export const SHOT_PRESETS: ShotPresetSpec[] = [
   {
     id: 'lifestyle-scene',
     name: 'Lifestyle Scene',
+    bestFor: 'Ads and social',
     shortDescription: 'Realistic category environment, natural window light, shallow DOF',
     defaultAspectRatio: '16:9',
     isWhiteBackground: false,
@@ -208,6 +212,7 @@ export const SHOT_PRESETS: ShotPresetSpec[] = [
   {
     id: 'flat-lay',
     name: 'Flat Lay',
+    bestFor: 'Social and editorial',
     shortDescription: '90° top-down overhead composition, minimal styled props, even daylight',
     defaultAspectRatio: '1:1',
     isWhiteBackground: false,
@@ -220,6 +225,7 @@ export const SHOT_PRESETS: ShotPresetSpec[] = [
   {
     id: 'macro-detail',
     name: 'Macro Detail',
+    bestFor: 'Texture and detail',
     shortDescription: '100mm macro close-up highlighting material weave, grain & finish',
     defaultAspectRatio: '4:5',
     isWhiteBackground: false,
@@ -232,6 +238,7 @@ export const SHOT_PRESETS: ShotPresetSpec[] = [
   {
     id: 'packaging-mockup',
     name: 'Packaging Mockup',
+    bestFor: 'Box and label previews',
     shortDescription: 'Box/bag/label on neutral surface, sharp edges, straight-on',
     defaultAspectRatio: '3:4',
     isWhiteBackground: false,
@@ -276,6 +283,92 @@ export const REFINE_CHIPS: RefineChipSpec[] = [
     instruction: 'Accentuate tactile surface grain, stitching, and micro-material crispness.',
   },
 ];
+
+const CATEGORY_KEYWORDS: ReadonlyArray<{
+  id: ProductCategoryId;
+  patterns: RegExp[];
+}> = [
+  {
+    id: 'watches-accessories',
+    patterns: [
+      /\b(watch|watches|chronograph|timepiece|horology|watchband|watch\s+strap|bezel|diver\s+watch|field\s+watch|gmt)\b/i,
+    ],
+  },
+  {
+    id: 'footwear',
+    patterns: [
+      /\b(shoe|shoes|sneaker|sneakers|boot|boots|trainer|trainers|sandal|sandals|loafer|loafers|heel|heels|cleat|runner|slipper|footwear)\b/i,
+    ],
+  },
+  {
+    id: 'jewelry',
+    patterns: [
+      /\b(ring|rings|necklace|necklaces|earring|earrings|bracelet|bracelets|pendant|diamond|gemstone|anklet|brooch|cufflink|jewelry|jewellery)\b/i,
+    ],
+  },
+  {
+    id: 'beauty-skincare',
+    patterns: [
+      /\b(serum|skincare|moisturizer|cleanser|toner|cream|lotion|perfume|fragrance|cologne|cosmetic|lipstick|mascara|dropper|ampoule|sunscreen|balm)\b/i,
+    ],
+  },
+  {
+    id: 'bags-accessories',
+    patterns: [
+      /\b(bag|bags|tote|backpack|handbag|crossbody|wallet|purse|duffel|luggage|suitcase|satchel|briefcase|messenger|pouch|belt)\b/i,
+    ],
+  },
+  {
+    id: 'apparel',
+    patterns: [
+      /\b(shirt|t-shirt|tee|jacket|coat|hoodie|sweater|cardigan|knitwear|dress|jeans|denim|trousers|pants|shorts|skirt|blazer|vest|apparel|garment)\b/i,
+    ],
+  },
+  {
+    id: 'electronics',
+    patterns: [
+      /\b(headphone|headphones|earbud|earbuds|speaker|keyboard|mouse|camera|lens|laptop|tablet|phone|smartphone|charger|microphone|dac|console|gadget|router)\b/i,
+    ],
+  },
+  {
+    id: 'food-beverage',
+    patterns: [
+      /\b(coffee|espresso|tea|matcha|chocolate|snack|granola|honey|olive\s+oil|sauce|wine|beer|whiskey|soda|juice|beverage|roast|cookie|pasta)\b/i,
+    ],
+  },
+  {
+    id: 'bottles-packaging',
+    patterns: [
+      /\b(bottle|carton|box|packaging|jar|tin|can|canister|tumbler|flask|thermos|label|pouch\s+pack|mailer)\b/i,
+    ],
+  },
+  {
+    id: 'toys',
+    patterns: [
+      /\b(toy|toys|plush|figurine|puzzle|blocks|doll|lego|action\s+figure|board\s+game|playset)\b/i,
+    ],
+  },
+  {
+    id: 'home-furniture',
+    patterns: [
+      /\b(kettle|chair|sofa|couch|lamp|table|desk|mug|cup|vase|candle|pillow|cushion|stool|shelf|chair|ceramic|carafe|teapot|bowl|planter)\b/i,
+    ],
+  },
+];
+
+/**
+ * Pure client-side keyword category detection (zero API calls).
+ */
+export function detectCategoryFromName(name: string): ProductCategoryId | null {
+  const cleaned = name.trim();
+  if (!cleaned) return null;
+  for (const entry of CATEGORY_KEYWORDS) {
+    if (entry.patterns.some((re) => re.test(cleaned))) {
+      return entry.id;
+    }
+  }
+  return null;
+}
 
 export function getCategorySpec(id: ProductCategoryId): ProductCategorySpec {
   return PRODUCT_CATEGORIES.find((c) => c.id === id) ?? PRODUCT_CATEGORIES[0];

@@ -1,22 +1,21 @@
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Aperture,
-  Check,
   Clock,
   Crop,
   Crosshair,
+  Eye,
   Layers,
-  RotateCcw,
   Sparkles,
-  Wand2,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   ASPECT_RATIOS,
   DEFAULT_FREE_MODEL_ID,
+  detectQualityModeForModel,
   findModelById,
   formatBatchEstimate,
   formatModelPrice,
@@ -29,15 +28,17 @@ import {
   type DiscoverySource,
   type ModelTier,
   type NormalizedImageModel,
+  type QualityModeId,
 } from '@/lib/models';
 import {
+  detectCategoryFromName,
   getShotPreset,
-  SHOT_PRESETS,
   type ShotPresetId,
 } from '@/lib/presets';
 import {
   buildPreservationPrompt,
   buildPrompt,
+  createEmptyBrief,
   DEFAULT_BRIEF,
   SAMPLE_BRIEFS,
   type ProductBrief,
@@ -52,36 +53,38 @@ import {
   type MarketplaceAlignPresetId,
 } from '@/lib/packshot-crop';
 import {
+  DEFAULT_PANEL_PREFS,
   DEFAULT_SETTINGS,
   inferPresetCategory,
   isSvgMedia,
   loadHistory,
   loadModelCostStats,
+  loadPanelPreferences,
   loadSettings,
   loadUserPresets,
   recordModelCostSample,
   saveHistory,
   saveModelCostStats,
+  savePanelPreferences,
   saveSettings,
   saveUserPresets,
   seedModelCostStatsFromHistory,
   type GeneratedImageItem,
   type GenerationRecord,
   type ModelCostStatsMap,
+  type StudioPanelPreferences,
   type StudioSettings,
   type UserPreset,
 } from '@/lib/db';
 import { TopBar, type StudioTab } from '@/components/top-bar';
 import { CommandPalette } from '@/components/command-palette';
-import { BriefForm } from '@/components/brief-form';
+import type { DiscoveryStatus } from '@/components/model-selector';
+import type { PresetDraftSnapshot } from '@/components/panel/templates-menu';
 import {
-  ModelSelector,
-  type DiscoveryStatus,
-} from '@/components/model-selector';
-import {
-  UserPresetsPanel,
-  type PresetDraftSnapshot,
-} from '@/components/user-presets-panel';
+  LeftControlPanel,
+  type AccordionStepNumber,
+} from '@/components/panel/left-control-panel';
+import { PromptDrawer } from '@/components/panel/prompt-drawer';
 import { ImageResultCard } from '@/components/image-result-card';
 import { AutoCropModal } from '@/components/auto-crop-modal';
 import { LightboxModal } from '@/components/lightbox-modal';
@@ -95,10 +98,6 @@ import { SettingsView } from '@/components/settings-view';
 import { detectNearestAspectRatio } from '@/lib/multiview';
 import { StudioModal } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Switch } from '@/components/ui/switch';
-import { Textarea } from '@/components/ui/textarea';
 import {
   Select,
   SelectContent,
@@ -125,13 +124,7 @@ interface PendingImageSlot {
   image?: GeneratedImageItem;
 }
 
-const SHOT_SET_PRESET_IDS: readonly ShotPresetId[] = [
-  'marketplace-packshot',
-  'lifestyle-scene',
-  'macro-detail',
-  'flat-lay',
-  'studio-hero',
-];
+const PANEL_STEPS_SESSION_KEY = 'packshot-studio:open-steps:v1';
 
 function getDefaultResolutionForModel(
   model?: NormalizedImageModel | null
@@ -217,6 +210,17 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
   } | null>(null);
 
   // Generation control state
+  const [panelPrefs, setPanelPrefs] = useState<StudioPanelPreferences>(DEFAULT_PANEL_PREFS);
+  const [openSteps, setOpenSteps] = useState<Record<AccordionStepNumber, boolean>>({
+    1: true,
+    2: false,
+    3: false,
+  });
+  const [lastFocusedStep, setLastFocusedStep] = useState<AccordionStepNumber>(1);
+  const [promptDrawerOpen, setPromptDrawerOpen] = useState(false);
+  const [categoryManuallyOverridden, setCategoryManuallyOverridden] = useState(false);
+  const [ratioOverrideActive, setRatioOverrideActive] = useState(false);
+
   const [brief, setBrief] = useState<ProductBrief>(DEFAULT_BRIEF);
   const [shotId, setShotId] = useState<ShotPresetId>('marketplace-packshot');
   const [modelId, setModelId] = useState<string>(DEFAULT_FREE_MODEL_ID);
@@ -387,17 +391,41 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
     }
   }, [applyDiscoveryResponse]);
 
-  // Hydrate settings, history & per-model cost stats from IndexedDB + discover models
+  // Hydrate settings, history, panel preferences & per-model cost stats from IndexedDB + discover models
   useEffect(() => {
     let active = true;
+
+    // Restore session-scoped accordion open/closed state
+    try {
+      const rawSteps = sessionStorage.getItem(PANEL_STEPS_SESSION_KEY);
+      if (rawSteps) {
+        const parsed = JSON.parse(rawSteps) as Partial<Record<AccordionStepNumber, boolean>>;
+        if (typeof parsed === 'object' && parsed !== null) {
+          setOpenSteps({
+            1: typeof parsed[1] === 'boolean' ? parsed[1] : true,
+            2: typeof parsed[2] === 'boolean' ? parsed[2] : false,
+            3: typeof parsed[3] === 'boolean' ? parsed[3] : false,
+          });
+        }
+      }
+    } catch {
+      // Ignore storage access errors
+    }
+
     (async () => {
-      const [loadedSettings, loadedHistory, loadedCostStats, loadedUserPresets] =
-        await Promise.all([
-          loadSettings(),
-          loadHistory(),
-          loadModelCostStats(),
-          loadUserPresets(),
-        ]);
+      const [
+        loadedSettings,
+        loadedHistory,
+        loadedCostStats,
+        loadedUserPresets,
+        loadedPanelPrefs,
+      ] = await Promise.all([
+        loadSettings(),
+        loadHistory(),
+        loadModelCostStats(),
+        loadUserPresets(),
+        loadPanelPreferences(),
+      ]);
       if (!active) return;
       const seededStats = seedModelCostStatsFromHistory(loadedCostStats, loadedHistory);
       if (Object.keys(seededStats).length > Object.keys(loadedCostStats).length) {
@@ -406,6 +434,14 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
       setCostStats(seededStats);
       setUserPresets(loadedUserPresets);
       setSettings(loadedSettings);
+      setPanelPrefs(loadedPanelPrefs);
+      setShotId(loadedPanelPrefs.shotId);
+      setVariations(loadedPanelPrefs.variations);
+      setBrief((prev) =>
+        prev.name.trim()
+          ? prev
+          : { ...prev, category: loadedPanelPrefs.category }
+      );
       setModelId(loadedSettings.defaultModel);
       setAspectRatio(loadedSettings.defaultAspectRatio);
       setHistory(loadedHistory);
@@ -480,6 +516,89 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
       return next;
     });
   }, []);
+
+  const updatePanelPrefs = useCallback(
+    (patch: Partial<StudioPanelPreferences>) => {
+      setPanelPrefs((prev) => {
+        const next = { ...prev, ...patch };
+        void savePanelPreferences(next);
+        return next;
+      });
+    },
+    []
+  );
+
+  const persistOpenSteps = useCallback(
+    (next: Record<AccordionStepNumber, boolean>) => {
+      setOpenSteps(next);
+      try {
+        sessionStorage.setItem(PANEL_STEPS_SESSION_KEY, JSON.stringify(next));
+      } catch {
+        // Ignore session storage errors
+      }
+    },
+    []
+  );
+
+  const handleToggleStep = useCallback(
+    (step: AccordionStepNumber) => {
+      setLastFocusedStep(step);
+      setOpenSteps((prev) => {
+        const next = { ...prev, [step]: !prev[step] };
+        try {
+          sessionStorage.setItem(PANEL_STEPS_SESSION_KEY, JSON.stringify(next));
+        } catch {
+          // Ignore session storage errors
+        }
+        return next;
+      });
+    },
+    []
+  );
+
+  const handleExpandAndOpenStep = useCallback(
+    (step: AccordionStepNumber) => {
+      updatePanelPrefs({ panelCollapsed: false });
+      setLastFocusedStep(step);
+      setOpenSteps((prev) => {
+        const next = { ...prev, [step]: true };
+        try {
+          sessionStorage.setItem(PANEL_STEPS_SESSION_KEY, JSON.stringify(next));
+        } catch {
+          // Ignore session storage errors
+        }
+        return next;
+      });
+    },
+    [updatePanelPrefs]
+  );
+
+  // Auto-open Step 2 once Step 1 transitions from incomplete -> complete after hydration
+  const step1Valid =
+    Boolean(brief.name.trim()) &&
+    (inputMode === 'text' || inputReferences.length > 0);
+  const prevStep1ValidRef = useRef<boolean | null>(null);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    if (prevStep1ValidRef.current === null) {
+      prevStep1ValidRef.current = step1Valid;
+      return;
+    }
+    if (!prevStep1ValidRef.current && step1Valid) {
+      setOpenSteps((prev) => {
+        if (prev[2]) return prev;
+        const next = { ...prev, 2: true };
+        try {
+          sessionStorage.setItem(PANEL_STEPS_SESSION_KEY, JSON.stringify(next));
+        } catch {
+          // Ignore session storage errors
+        }
+        return next;
+      });
+    }
+    prevStep1ValidRef.current = step1Valid;
+  }, [hydrated, step1Valid]);
 
   const selectedModel = useMemo(
     () =>
@@ -557,10 +676,52 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
     [selectedModel, models, settings.modelTier, handleSelectModel]
   );
 
+  const hasAnyReferenceCapableModel = useMemo(
+    () => models.some((m) => m.allowed !== false && m.supportsReference),
+    [models]
+  );
+
+  const handleSwitchToReferenceModelAndPhotoMode = useCallback(() => {
+    const refModel = pickCheapestRecommendedReferenceModel(
+      models,
+      settings.modelTier
+    );
+    if (!refModel) {
+      toast.error('No reference-capable model is currently available.');
+      return;
+    }
+    handleSelectModel(refModel.id, false);
+    if (refModel.tier !== settings.modelTier) {
+      updateSettings({
+        modelTier: refModel.tier,
+        defaultModel: refModel.id,
+      });
+    }
+    setInputMode('photo');
+    toast.info(
+      `Switched to ${refModel.name} (${formatModelPrice(refModel, costStats[refModel.id])}) for Photo mode`
+    );
+  }, [models, settings.modelTier, handleSelectModel, updateSettings, costStats]);
+
+  const handleSelectQualityMode = useCallback(
+    (modeId: QualityModeId, resolvedModel: NormalizedImageModel) => {
+      updatePanelPrefs({ qualityMode: modeId });
+      updateSettings({
+        modelTier: resolvedModel.tier,
+        defaultModel: resolvedModel.id,
+      });
+      handleSelectModel(resolvedModel.id, false);
+    },
+    [updatePanelPrefs, updateSettings, handleSelectModel]
+  );
+
   const handleTierChange = useCallback(
     (nextTier: ModelTier) => {
       const tierModels = models.filter(
-        (m) => m.tier === nextTier && (inputMode === 'photo' || !m.requiresReference)
+        (m) =>
+          m.allowed !== false &&
+          m.tier === nextTier &&
+          (inputMode === 'photo' || !m.requiresReference)
       );
 
       if (tierModels.length === 0) {
@@ -637,9 +798,19 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
     (nextShotId: ShotPresetId) => {
       const preset = getShotPreset(nextShotId);
       setShotId(nextShotId);
+      updatePanelPrefs({ shotId: nextShotId });
+      setRatioOverrideActive(false);
       applyAspectRatioWithClamp(preset.defaultAspectRatio, selectedModel);
       setActiveRefineChips([]);
       setPromptEditedManually(false);
+    },
+    [applyAspectRatioWithClamp, selectedModel, updatePanelPrefs]
+  );
+
+  const handleSelectCustomAspectRatio = useCallback(
+    (nextRatio: AspectRatio) => {
+      setRatioOverrideActive(true);
+      applyAspectRatioWithClamp(nextRatio, selectedModel);
     },
     [applyAspectRatioWithClamp, selectedModel]
   );
@@ -648,14 +819,33 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
     (sample: SampleBriefPreset) => {
       const preset = getShotPreset(sample.shotId);
       setBrief(sample.brief);
+      setCategoryManuallyOverridden(false);
+      updatePanelPrefs({
+        category: sample.brief.category,
+        shotId: sample.shotId,
+      });
       setShotId(sample.shotId);
+      setRatioOverrideActive(false);
       applyAspectRatioWithClamp(preset.defaultAspectRatio, selectedModel);
       setActiveRefineChips([]);
       setPromptEditedManually(false);
       toast.success(`Loaded "${sample.label}" brief`);
     },
-    [applyAspectRatioWithClamp, selectedModel]
+    [applyAspectRatioWithClamp, selectedModel, updatePanelPrefs]
   );
+
+  const handleClearForm = useCallback(() => {
+    setBrief(createEmptyBrief(panelPrefs.category));
+    setCategoryManuallyOverridden(false);
+    setInputReferences([]);
+    setActiveRefineChips([]);
+    setPromptEditedManually(false);
+    setActivePresetId(null);
+    setGenerationErrors([]);
+    persistOpenSteps({ 1: true, 2: false, 3: false });
+    setLastFocusedStep(1);
+    toast.success('Form cleared');
+  }, [panelPrefs.category, persistOpenSteps]);
 
   const handlePreviewEnhance = useCallback(async () => {
     if (isEnhancingPreview) return;
@@ -1722,10 +1912,21 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
         (record.modelId.endsWith(':free') ? 'free' : 'paid');
 
       setBrief(record.brief);
+      setCategoryManuallyOverridden(true);
       setShotId(record.shotId);
       setModelId(record.modelId);
       setQualitySelection(null);
       updateSettings({ modelTier: targetTier });
+      const detectedMode = detectQualityModeForModel(
+        record.modelId,
+        models,
+        inputMode
+      );
+      updatePanelPrefs({
+        category: record.brief.category,
+        shotId: record.shotId,
+        ...(detectedMode ? { qualityMode: detectedMode } : {}),
+      });
       setAspectRatio(record.aspectRatio);
       setActiveRefineChips(record.refineChips ?? []);
       setManualPromptText(record.prompt);
@@ -1765,7 +1966,7 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
       handleTabChange('generate');
       toast.success(`Loaded "${record.brief.name}" into Studio`);
     },
-    [models, updateSettings, handleTabChange, ensureReferenceCapableModel]
+    [models, inputMode, updateSettings, updatePanelPrefs, handleTabChange, ensureReferenceCapableModel]
   );
 
   const handleUseAsReference = useCallback(
@@ -1977,7 +2178,7 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
     toast.success('Local library cleared');
   }, []);
 
-  // Global keyboard shortcuts: Cmd/Ctrl+K (Palette), Cmd/Ctrl+Enter (Generate)
+  // Global keyboard shortcuts: Cmd/Ctrl+K (Palette), Cmd/Ctrl+Enter (Generate), [ and ] step navigation
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
@@ -1990,11 +2191,47 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
           activeTab === 'generate' &&
           !commandPaletteOpen &&
           !lightboxState.open &&
-          !costConfirmState.open
+          !costConfirmState.open &&
+          !multiViewState.open
         ) {
           e.preventDefault();
           void runGeneration();
         }
+        return;
+      }
+
+      if (
+        (e.key === '[' || e.key === ']') &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        activeTab === 'generate' &&
+        !commandPaletteOpen &&
+        !lightboxState.open &&
+        !costConfirmState.open &&
+        !multiViewState.open &&
+        !promptDrawerOpen
+      ) {
+        const target = e.target as HTMLElement | null;
+        const tag = target?.tagName?.toLowerCase();
+        if (
+          tag === 'input' ||
+          tag === 'textarea' ||
+          tag === 'select' ||
+          target?.isContentEditable
+        ) {
+          return;
+        }
+        e.preventDefault();
+        const delta = e.key === ']' ? 1 : -1;
+        const nextStep = Math.min(3, Math.max(1, lastFocusedStep + delta)) as AccordionStepNumber;
+        setLastFocusedStep(nextStep);
+        updatePanelPrefs({ panelCollapsed: false });
+        persistOpenSteps({
+          1: nextStep === 1,
+          2: nextStep === 2,
+          3: nextStep === 3,
+        });
       }
     };
     window.addEventListener('keydown', onKeyDown);
@@ -2004,6 +2241,11 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
     commandPaletteOpen,
     lightboxState.open,
     costConfirmState.open,
+    multiViewState.open,
+    promptDrawerOpen,
+    lastFocusedStep,
+    updatePanelPrefs,
+    persistOpenSteps,
     runGeneration,
   ]);
 
@@ -2021,11 +2263,6 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
         currentRecord.brief.backgroundColor.toUpperCase() === '#FFFFFF')
     );
   }, [currentRecord]);
-
-  const hasExplicitParam = useCallback(
-    (param: string) => selectedModel.supportedParams.includes(param),
-    [selectedModel.supportedParams]
-  );
 
   const batchEstimate = useMemo(
     () =>
@@ -2276,11 +2513,24 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
           ? preset.outputFormat
           : 'auto'
       );
-      setVariations(Math.min(4, Math.max(1, preset.variations || 1)));
+      const clampedVariations = Math.min(4, Math.max(1, preset.variations || 1));
+      setVariations(clampedVariations);
       setCustomSeed(preset.customSeed ?? '');
       setUnavailableModelBanner(null);
       setSpendLimitNotice(null);
       setActivePresetId(preset.id);
+      const nextInputMode =
+        resolvedModel.requiresReference && inputMode === 'text' ? 'photo' : inputMode;
+      const detectedPresetMode = detectQualityModeForModel(
+        resolvedModel.id,
+        models,
+        nextInputMode
+      );
+      updatePanelPrefs({
+        shotId: preset.shotId,
+        variations: clampedVariations,
+        ...(detectedPresetMode ? { qualityMode: detectedPresetMode } : {}),
+      });
 
       if (resolvedModel.requiresReference && inputMode === 'text') {
         setInputMode('photo');
@@ -2294,7 +2544,7 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
         toast.success(`Applied preset "${preset.name}"`);
       }
     },
-    [models, inputMode, selectedModel, updateSettings, applyAspectRatioWithClamp]
+    [models, inputMode, selectedModel, updateSettings, updatePanelPrefs, applyAspectRatioWithClamp]
   );
 
   return (
@@ -2312,559 +2562,119 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
 
       <main className="flex-1">
         {activeTab === 'generate' ? (
-          <div className="mx-auto grid max-w-[1600px] grid-cols-1 lg:grid-cols-[410px_minmax(0,1fr)] min-h-[calc(100vh-56px)]">
-            {/* Left Control Panel */}
-            <aside className="studio-scrollbar border-b lg:border-b-0 lg:border-r border-[var(--border)] bg-[var(--background)] p-4 sm:p-5 pb-24 lg:pb-8 space-y-6 lg:max-h-[calc(100vh-56px)] lg:overflow-y-auto">
-              {/* User-Defined Presets */}
-              <UserPresetsPanel
-                presets={userPresets}
-                activePresetId={activePresetId}
-                models={models}
-                costStats={costStats}
-                currentSnapshot={presetDraftSnapshot}
-                onSavePreset={handleSaveUserPreset}
-                onEditPreset={handleEditUserPreset}
-                onApplyPreset={handleApplyUserPreset}
-                onUpdatePreset={handleUpdateUserPreset}
-                onDeletePreset={handleDeleteUserPreset}
-              />
-
-              <hr className="border-[var(--border)]" />
-
-              {/* Section 1: Product Brief */}
-              <section className="space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <h2 className="text-[14px] font-semibold tracking-[-0.02em] text-[var(--foreground)]">
-                    1. Product Brief
-                  </h2>
-                  <div className="flex items-center gap-1">
-                    {SAMPLE_BRIEFS.slice(0, 2).map((sample) => (
-                      <button
-                        key={sample.id}
-                        type="button"
-                        onClick={() => handleLoadSample(sample)}
-                        className="h-6 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-2 text-[11px] text-[var(--muted-foreground)] hover:border-[var(--border-hover)] hover:text-[var(--foreground)] cursor-pointer transition-colors whitespace-nowrap"
-                      >
-                        {sample.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <BriefForm
-                  brief={brief}
-                  onChange={(next) => {
-                    setBrief(next);
-                    if (promptEditedManually) {
-                      setPromptEditedManually(false);
-                    }
-                  }}
-                  selectedModel={selectedModel}
-                  inputMode={inputMode}
-                  onInputModeChange={handleInputModeChange}
-                  inputReferences={inputReferences}
-                  onInputReferencesChange={setInputReferences}
-                  isWhiteBackgroundPreset={
-                    isShotSetActive
-                      ? shotSetPresetIds.includes('marketplace-packshot')
-                      : selectedShot.isWhiteBackground
-                  }
-                  variations={variations}
-                />
-              </section>
-
-              <hr className="border-[var(--border)]" />
-
-              {/* Section 2: Shot Preset / Shot Set */}
-              <section className="space-y-2.5">
-                <div className="flex items-center justify-between gap-2">
-                  <h2 className="text-[14px] font-semibold tracking-[-0.02em] text-[var(--foreground)]">
-                    2. Shot Type
-                  </h2>
-                  <span className="font-mono text-[11px] text-[var(--muted-foreground)]">
-                    {isShotSetActive
-                      ? `${shotSetPresetIds.length} presets selected`
-                      : `${selectedShot.defaultAspectRatio} default`}
-                  </span>
-                </div>
-
-                {inputMode === 'photo' ? (
-                  <div className="flex items-center justify-between gap-2 rounded-[8px] border border-[var(--border)] bg-[var(--surface)] px-2.5 py-2">
-                    <div className="min-w-0">
-                      <Label
-                        htmlFor="photo-shot-set-switch"
-                        className="flex items-center gap-1.5 text-[12px] font-medium text-[var(--foreground)] cursor-pointer"
-                      >
-                        <Layers className="h-3.5 w-3.5 text-[var(--muted-foreground)]" />
-                        <span>Generate shot set</span>
-                      </Label>
-                      <p className="text-[10px] text-[var(--muted-foreground)]">
-                        Fires one reference-preserving request per selected preset
-                      </p>
-                    </div>
-                    <Switch
-                      id="photo-shot-set-switch"
-                      checked={photoShotSetEnabled}
-                      onCheckedChange={setPhotoShotSetEnabled}
-                    />
-                  </div>
-                ) : null}
-
-                {isShotSetActive ? (
-                  <div className="space-y-2">
-                    <div className="grid grid-cols-2 gap-2">
-                      {SHOT_SET_PRESET_IDS.map((presetId) => {
-                        const preset = getShotPreset(presetId);
-                        const active = shotSetPresetIds.includes(presetId);
-                        return (
-                          <button
-                            key={presetId}
-                            type="button"
-                            aria-pressed={active}
-                            onClick={() => {
-                              setShotSetPresetIds((prev) => {
-                                if (prev.includes(presetId)) {
-                                  if (prev.length <= 1) return prev;
-                                  return prev.filter((id) => id !== presetId);
-                                }
-                                return [...prev, presetId];
-                              });
-                            }}
-                            className={cn(
-                              'flex flex-col items-start rounded-[8px] border p-2.5 text-left transition-colors duration-150 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3]',
-                              active
-                                ? 'border-[var(--foreground)] bg-[var(--surface)]'
-                                : 'border-[var(--border)] bg-[var(--card)] hover:border-[var(--border-hover)] opacity-75'
-                            )}
-                          >
-                            <div className="flex w-full items-center justify-between gap-1">
-                              <span className="text-[12px] font-semibold text-[var(--foreground)] truncate">
-                                {preset.name}
-                              </span>
-                              <span
-                                className={cn(
-                                  'inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] border',
-                                  active
-                                    ? 'border-[var(--foreground)] bg-[var(--foreground)] text-[var(--background)]'
-                                    : 'border-[var(--border)] bg-transparent'
-                                )}
-                              >
-                                {active ? <Check className="h-3 w-3" /> : null}
-                              </span>
-                            </div>
-                            <span className="mt-1 font-mono text-[10px] text-[var(--muted-foreground)]">
-                              {preset.defaultAspectRatio} ·{' '}
-                              {preset.id === 'marketplace-packshot'
-                                ? 'White #FFFFFF'
-                                : preset.shortDescription.split(',')[0]}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                    <div className="flex items-center justify-between text-[11px] text-[var(--muted-foreground)]">
-                      <span className="font-mono tabular-nums">
-                        {shotSetPresetIds.length} presets × {variations} var ={' '}
-                        {totalPlannedShots} total shots
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => setShotSetPresetIds([...SHOT_SET_PRESET_IDS])}
-                        className="text-[11px] font-medium text-[var(--foreground)] hover:underline cursor-pointer"
-                      >
-                        Select all 5
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-2 gap-2">
-                    {SHOT_PRESETS.map((preset) => {
-                      const active = shotId === preset.id;
-                      return (
-                        <button
-                          key={preset.id}
-                          type="button"
-                          onClick={() => handleSelectShotPreset(preset.id)}
-                          className={cn(
-                            'flex flex-col items-start rounded-[8px] border p-2.5 text-left transition-colors duration-150 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3]',
-                            active
-                              ? 'border-[var(--foreground)] bg-[var(--surface)]'
-                              : 'border-[var(--border)] bg-[var(--card)] hover:border-[var(--border-hover)]'
-                          )}
-                        >
-                          <div className="flex w-full items-center justify-between gap-1">
-                            <span className="text-[12px] font-semibold text-[var(--foreground)] truncate">
-                              {preset.name}
-                            </span>
-                            {active ? (
-                              <Check className="h-3.5 w-3.5 shrink-0 text-[var(--foreground)]" />
-                            ) : null}
-                          </div>
-                          <span className="mt-1 line-clamp-2 text-[11px] leading-snug text-[var(--muted-foreground)]">
-                            {preset.shortDescription}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </section>
-
-              <hr className="border-[var(--border)]" />
-
-              {/* Section 3: Model & Output (Dynamic Tier + Capability-Driven Controls) */}
-              <section className="space-y-4">
-                <h2 className="text-[14px] font-semibold tracking-[-0.02em] text-[var(--foreground)]">
-                  3. Model &amp; Output
-                </h2>
-
-                <ModelSelector
-                  models={models}
-                  tier={settings.modelTier}
-                  onTierChange={handleTierChange}
-                  selectedModelId={selectedModel.id}
-                  onSelectModel={(id) => handleSelectModel(id, false)}
-                  inputMode={inputMode}
-                  discoveryStatus={discoveryStatus}
-                  isLoadingModels={isLoadingModels}
-                  onRetryDiscovery={handleRefreshModels}
-                  costStats={costStats}
-                  compact
-                />
-
-                {/* Aspect Ratio Chips (only when supported_parameters includes aspect_ratio) */}
-                {hasExplicitParam('aspect_ratio') ? (
-                  <div className="space-y-1.5">
-                    <Label>Aspect ratio</Label>
-                    <div className="grid grid-cols-5 gap-1.5">
-                      {ASPECT_RATIOS.map((ar) => {
-                        const isSupported =
-                          !selectedModel.supportedAspectRatios ||
-                          selectedModel.supportedAspectRatios.includes(ar.value);
-                        const active = aspectRatio === ar.value;
-                        return (
-                          <button
-                            key={ar.value}
-                            type="button"
-                            onClick={() => applyAspectRatioWithClamp(ar.value, selectedModel)}
-                            title={
-                              isSupported
-                                ? ar.hint
-                                : `${ar.label} unsupported by model (clamps automatically)`
-                            }
-                            className={cn(
-                              'h-8 rounded-[6px] border font-mono text-[12px] transition-colors duration-150 cursor-pointer whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3]',
-                              active
-                                ? 'border-[var(--foreground)] bg-[var(--foreground)] text-[var(--background)] font-medium'
-                                : isSupported
-                                  ? 'border-[var(--border)] bg-[var(--surface)] text-[var(--foreground)] hover:border-[var(--border-hover)]'
-                                  : 'border-[var(--border)] bg-[var(--surface)] text-[var(--muted-foreground)] opacity-55 hover:border-[var(--border-hover)]'
-                            )}
-                          >
-                            {ar.label}
-                          </button>
-                        );
-                      })}
-                    </div>
-                    {clampedRatioNote ? (
-                      <p className="text-[11px] text-amber-500">{clampedRatioNote}</p>
-                    ) : null}
-                  </div>
-                ) : null}
-
-                {/* Dynamic Capability Controls: resolution, quality, background, output_format, seed */}
-                {hasExplicitParam('resolution') ||
-                hasExplicitParam('quality') ||
-                hasExplicitParam('background') ||
-                hasExplicitParam('output_format') ||
-                hasExplicitParam('seed') ? (
-                  <div className="grid grid-cols-2 gap-2.5">
-                    {hasExplicitParam('resolution') ? (
-                      <div className="space-y-1">
-                        <Label htmlFor="resolution-select">Resolution</Label>
-                        <Select value={resolution} onValueChange={setResolution}>
-                          <SelectTrigger id="resolution-select" className="h-8 text-[12px]">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="auto">Auto</SelectItem>
-                            {(selectedModel.supportedResolutions ?? ['1K', '2K']).map(
-                              (resOpt) => (
-                                <SelectItem key={resOpt} value={resOpt}>
-                                  {resOpt}
-                                </SelectItem>
-                              )
-                            )}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                    ) : null}
-
-                    {hasExplicitParam('quality') ? (
-                      <div className="space-y-1">
-                        <Label htmlFor="quality-select">Quality</Label>
-                        <Select
-                          value={effectiveQuality}
-                          onValueChange={(val) =>
-                            setQualitySelection({
-                              modelId: selectedModel.id,
-                              value: val,
-                            })
-                          }
-                        >
-                          <SelectTrigger id="quality-select" className="h-8 text-[12px]">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="auto">Auto</SelectItem>
-                            {(selectedModel.supportedQualities ?? ['low', 'medium', 'high']).map(
-                              (qOpt) => (
-                                <SelectItem key={qOpt} value={qOpt}>
-                                  {qOpt}
-                                </SelectItem>
-                              )
-                            )}
-                          </SelectContent>
-                        </Select>
-                        <p className="text-[10px] leading-snug text-[var(--muted-foreground)]">
-                          Defaulted to medium — &ldquo;high&rdquo; can cost several times more.
-                        </p>
-                      </div>
-                    ) : null}
-
-                    {hasExplicitParam('background') ? (
-                      <div className="space-y-1">
-                        <Label htmlFor="background-select">Background</Label>
-                        <Select
-                          value={backgroundMode}
-                          onValueChange={(val) =>
-                            setBackgroundMode(val as 'auto' | 'opaque' | 'transparent')
-                          }
-                        >
-                          <SelectTrigger id="background-select" className="h-8 text-[12px]">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="auto">Auto</SelectItem>
-                            {(selectedModel.supportedBackgrounds ?? ['opaque', 'transparent']).map(
-                              (bgOpt) => (
-                                <SelectItem key={bgOpt} value={bgOpt}>
-                                  {bgOpt}
-                                </SelectItem>
-                              )
-                            )}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                    ) : null}
-
-                    {hasExplicitParam('output_format') ? (
-                      <div className="space-y-1">
-                        <Label htmlFor="output-format-select">Format</Label>
-                        <Select
-                          value={outputFormat}
-                          onValueChange={(val) =>
-                            setOutputFormat(
-                              val as 'auto' | 'png' | 'webp' | 'jpeg' | 'svg'
-                            )
-                          }
-                        >
-                          <SelectTrigger id="output-format-select" className="h-8 text-[12px]">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="auto">Auto</SelectItem>
-                            {(selectedModel.supportedOutputFormats ?? ['png', 'webp', 'jpeg'])
-                              .filter((f) => ['png', 'webp', 'jpeg', 'svg'].includes(f.toLowerCase()))
-                              .map((fmt) => (
-                                <SelectItem key={fmt} value={fmt.toLowerCase()}>
-                                  {fmt.toUpperCase()}
-                                </SelectItem>
-                              ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                    ) : null}
-
-                    {hasExplicitParam('seed') ? (
-                      <div className="space-y-1">
-                        <Label htmlFor="seed-input">Seed (optional)</Label>
-                        <Input
-                          id="seed-input"
-                          value={customSeed}
-                          onChange={(e) =>
-                            setCustomSeed(e.target.value.replace(/[^0-9]/g, '').slice(0, 9))
-                          }
-                          placeholder="Random"
-                          className="h-8 font-mono text-[12px]"
-                        />
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
-
-                {selectedModel.supportedParams.length === 0 ? (
-                  <p className="text-[11px] text-[var(--muted-foreground)]">
-                    This model uses prompt-only generation (no extra parameters).
-                  </p>
-                ) : null}
-
-                {/* Variations (1..4) & Enhance with AI switch */}
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="space-y-1.5">
-                    <Label>Variations</Label>
-                    <div className="grid grid-cols-4 gap-1">
-                      {[1, 2, 3, 4].map((count) => {
-                        const active = variations === count;
-                        return (
-                          <button
-                            key={count}
-                            type="button"
-                            onClick={() => setVariations(count)}
-                            className={cn(
-                              'h-8 rounded-[6px] border font-mono text-[12px] tabular-nums transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3]',
-                              active
-                                ? 'border-[var(--foreground)] bg-[var(--foreground)] text-[var(--background)] font-medium'
-                                : 'border-[var(--border)] bg-[var(--surface)] text-[var(--foreground)] hover:border-[var(--border-hover)]'
-                            )}
-                          >
-                            {count}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <Label htmlFor="enhance-switch">Enhance with AI</Label>
-                    <div className="flex h-8 items-center justify-between rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-2.5">
-                      <span className="text-[12px] text-[var(--muted-foreground)]">
-                        {enhanceEnabled ? 'Enabled' : 'Deterministic'}
-                      </span>
-                      <Switch
-                        id="enhance-switch"
-                        checked={enhanceEnabled}
-                        onCheckedChange={setEnhanceEnabled}
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Prompt Inspector */}
-                {settings.showPromptInspector ? (
-                  <div className="space-y-1.5 pt-1">
-                    <div className="flex items-center justify-between gap-2">
-                      <Label htmlFor="prompt-inspector">Prompt inspector</Label>
-                      <div className="flex items-center gap-2">
-                        {enhanceEnabled ? (
-                          <button
-                            type="button"
-                            disabled={isEnhancingPreview}
-                            onClick={handlePreviewEnhance}
-                            className="inline-flex items-center gap-1 text-[11px] text-[#0070f3] hover:underline cursor-pointer disabled:opacity-50"
-                          >
-                            <Wand2 className="h-3 w-3" />
-                            <span>{isEnhancingPreview ? 'Enhancing...' : 'Preview AI'}</span>
-                          </button>
-                        ) : null}
-                        {promptEditedManually ? (
-                          <button
-                            type="button"
-                            onClick={() => setPromptEditedManually(false)}
-                            className="inline-flex items-center gap-1 text-[11px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] cursor-pointer"
-                          >
-                            <RotateCcw className="h-3 w-3" />
-                            <span>Reset to auto-built</span>
-                          </button>
-                        ) : null}
-                      </div>
-                    </div>
-
-                    <Textarea
-                      id="prompt-inspector"
-                      value={activePrompt}
-                      onChange={(e) => {
-                        setManualPromptText(e.target.value);
-                        setPromptEditedManually(true);
-                      }}
-                      className="min-h-[112px] font-mono text-[11px] leading-relaxed"
-                      maxLength={2000}
-                    />
-                    <div className="flex items-center justify-between font-mono text-[11px] text-[var(--muted-foreground)] tabular-nums">
-                      <span>
-                        {promptEditedManually ? 'Manual override active' : 'Auto-built Realism Engine'}
-                      </span>
-                      <span>{activePrompt.length}/2000</span>
-                    </div>
-                  </div>
-                ) : null}
-              </section>
-
-              {/* Desktop Generate CTA + Cost Estimate & Slow Hint */}
-              <div className="hidden lg:block space-y-2 pt-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <Button
-                    type="button"
-                    size="lg"
-                    disabled={isGenerating}
-                    onClick={() => void runGeneration()}
-                    className="flex-1 min-w-[175px] justify-between"
-                  >
-                    <span>
-                      {isGenerating
-                        ? (() => {
-                            const doneCount = pendingImageSlots.filter(
-                              (s) => s.status === 'done' || s.status === 'error'
-                            ).length;
-                            return `Generating ${doneCount}/${pendingSlots} shots...`;
-                          })()
-                        : isShotSetActive
-                          ? `Generate shot set (${totalPlannedShots} shots)`
-                          : `Generate ${variations} ${variations === 1 ? 'shot' : 'shots'}`}
-                    </span>
-                    <kbd className="font-mono text-[11px] opacity-75">⌘↵</kbd>
-                  </Button>
-
-                  {selectedModel.tier === 'paid' ? (
-                    <span className="inline-flex h-10 items-center rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-2.5 font-mono text-[11px] tabular-nums text-[var(--muted-foreground)] whitespace-nowrap shrink-0">
-                      {batchEstimate.label}
-                    </span>
-                  ) : null}
-                </div>
-
-                {selectedModel.tier === 'paid' && batchEstimate.perImageNote ? (
-                  <p className="font-mono text-[11px] tabular-nums text-[var(--muted-foreground)]">
-                    {batchEstimate.perImageNote}
-                  </p>
-                ) : null}
-
-                {spendLimitNotice ? (
-                  <div
-                    role="alert"
-                    className="rounded-[8px] border border-red-500/40 bg-[var(--surface)] px-3 py-2 text-[11px] text-red-400 space-y-1.5"
-                  >
-                    <p>{spendLimitNotice}</p>
-                    <button
-                      type="button"
-                      onClick={() => handleTabChange('settings')}
-                      className="font-medium text-[var(--foreground)] underline cursor-pointer"
-                    >
-                      Adjust limit in Settings
-                    </button>
-                  </div>
-                ) : null}
-
-                {showSlowModelHint ? (
-                  <p className="flex items-center gap-1.5 text-[11px] text-[var(--muted-foreground)]">
-                    <Clock className="h-3 w-3 shrink-0" />
-                    <span>This model can take over a minute</span>
-                  </p>
-                ) : null}
-              </div>
-            </aside>
+          <div className="mx-auto flex max-w-[1600px] flex-col lg:flex-row min-h-[calc(100vh-56px)]">
+            <LeftControlPanel
+              collapsed={panelPrefs.panelCollapsed}
+              onToggleCollapsed={() =>
+                updatePanelPrefs({ panelCollapsed: !panelPrefs.panelCollapsed })
+              }
+              openSteps={openSteps}
+              onToggleStep={handleToggleStep}
+              onExpandAndOpenStep={handleExpandAndOpenStep}
+              userPresets={userPresets}
+              activePresetId={activePresetId}
+              presetDraftSnapshot={presetDraftSnapshot}
+              onSavePreset={handleSaveUserPreset}
+              onEditPreset={handleEditUserPreset}
+              onApplyPreset={handleApplyUserPreset}
+              onUpdatePreset={handleUpdateUserPreset}
+              onDeletePreset={handleDeleteUserPreset}
+              onClearForm={handleClearForm}
+              inputMode={inputMode}
+              onInputModeChange={handleInputModeChange}
+              onSwitchToReferenceModelAndPhotoMode={handleSwitchToReferenceModelAndPhotoMode}
+              hasAnyReferenceCapableModel={hasAnyReferenceCapableModel}
+              brief={brief}
+              onBriefChange={(next) => {
+                setBrief(next);
+                if (next.category !== brief.category) {
+                  updatePanelPrefs({ category: next.category });
+                }
+                if (promptEditedManually) {
+                  setPromptEditedManually(false);
+                }
+              }}
+              categoryManuallyOverridden={categoryManuallyOverridden}
+              onManualCategoryChange={(cat) => {
+                setCategoryManuallyOverridden(true);
+                setBrief((prev) => ({ ...prev, category: cat }));
+                updatePanelPrefs({ category: cat });
+                if (promptEditedManually) {
+                  setPromptEditedManually(false);
+                }
+              }}
+              onResetCategoryAutoDetect={() => {
+                setCategoryManuallyOverridden(false);
+                const detected = detectCategoryFromName(brief.name) ?? panelPrefs.category;
+                setBrief((prev) => ({ ...prev, category: detected }));
+                updatePanelPrefs({ category: detected });
+              }}
+              inputReferences={inputReferences}
+              onInputReferencesChange={setInputReferences}
+              onLoadSample={handleLoadSample}
+              shotId={shotId}
+              onSelectShot={handleSelectShotPreset}
+              photoShotSetEnabled={photoShotSetEnabled}
+              onPhotoShotSetChange={setPhotoShotSetEnabled}
+              shotSetPresetIds={shotSetPresetIds}
+              onShotSetPresetsChange={setShotSetPresetIds}
+              aspectRatio={aspectRatio}
+              ratioOverrideActive={ratioOverrideActive}
+              clampedRatioNote={clampedRatioNote}
+              onSelectAspectRatio={handleSelectCustomAspectRatio}
+              models={models}
+              tier={settings.modelTier}
+              onTierChange={handleTierChange}
+              selectedModel={selectedModel}
+              onSelectModel={(id) => handleSelectModel(id, false)}
+              onSelectQualityMode={handleSelectQualityMode}
+              discoveryStatus={discoveryStatus}
+              isLoadingModels={isLoadingModels}
+              onRetryDiscovery={handleRefreshModels}
+              costStats={costStats}
+              variations={variations}
+              onVariationsChange={(count) => {
+                const clamped = Math.min(4, Math.max(1, count));
+                setVariations(clamped);
+                updatePanelPrefs({ variations: clamped });
+              }}
+              enhanceEnabled={enhanceEnabled}
+              onEnhanceChange={setEnhanceEnabled}
+              resolution={resolution}
+              onResolutionChange={setResolution}
+              effectiveQuality={effectiveQuality}
+              onQualityChange={(val) =>
+                setQualitySelection({
+                  modelId: selectedModel.id,
+                  value: val,
+                })
+              }
+              backgroundMode={backgroundMode}
+              onBackgroundModeChange={setBackgroundMode}
+              outputFormat={outputFormat}
+              onOutputFormatChange={setOutputFormat}
+              customSeed={customSeed}
+              onCustomSeedChange={setCustomSeed}
+              isGenerating={isGenerating}
+              doneCount={
+                pendingImageSlots.filter(
+                  (s) => s.status === 'done' || s.status === 'error'
+                ).length
+              }
+              pendingSlots={pendingSlots}
+              elapsedMs={elapsedMs}
+              batchEstimate={batchEstimate}
+              spendLimitNotice={spendLimitNotice}
+              promptEditedManually={promptEditedManually}
+              showPromptInspector={settings.showPromptInspector}
+              showSlowModelHint={showSlowModelHint}
+              onGenerate={() => void runGeneration()}
+              onOpenPromptDrawer={() => setPromptDrawerOpen(true)}
+              onGoToSettings={() => handleTabChange('settings')}
+            />
 
             {/* Right Studio Canvas */}
-            <section className="studio-dot-grid relative flex flex-col p-4 sm:p-6 pb-24 lg:pb-8 min-w-0">
+            <section className="studio-dot-grid relative flex-1 flex flex-col p-4 sm:p-6 pb-32 lg:pb-8 min-w-0 lg:max-h-[calc(100vh-56px)] lg:overflow-y-auto">
               {/* Unavailable Model (404 / 410) Banner */}
               {unavailableModelBanner ? (
                 <div
@@ -2955,7 +2765,7 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
                   ) : null}
                 </div>
 
-                <div className="flex flex-wrap items-center gap-3">
+                <div className="flex flex-wrap items-center gap-2.5">
                   {showSlowModelHint && isGenerating ? (
                     <span className="flex items-center gap-1.5 font-mono text-[11px] text-[var(--muted-foreground)]">
                       <Clock className="h-3 w-3 shrink-0" />
@@ -2966,6 +2776,21 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
                       AI-enhanced prompt applied
                     </span>
                   ) : null}
+
+                  <button
+                    type="button"
+                    onClick={() => setPromptDrawerOpen(true)}
+                    className="inline-flex items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--card)] px-2.5 py-1 text-[12px] font-medium text-[var(--foreground)] hover:border-[var(--border-hover)] cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3]"
+                  >
+                    <Eye className="h-3.5 w-3.5 text-[var(--muted-foreground)]" />
+                    <span>View prompt</span>
+                    {promptEditedManually ? (
+                      <span
+                        title="Manual prompt override active"
+                        className="h-1.5 w-1.5 rounded-full bg-[#0070f3]"
+                      />
+                    ) : null}
+                  </button>
 
                   <span className="rounded-[6px] border border-[var(--border)] bg-[var(--card)] px-2.5 py-1 font-mono text-[12px] tabular-nums text-[var(--muted-foreground)]">
                     Spent this session:{' '}
@@ -3488,40 +3313,6 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
                 </div>
               )}
             </section>
-
-            {/* Mobile Sticky Generate Bar */}
-            <div className="fixed inset-x-0 bottom-0 z-30 border-t border-[var(--border)] bg-[var(--background)]/95 p-3 backdrop-blur-sm lg:hidden space-y-1.5">
-              <div className="flex items-center gap-2">
-                <Button
-                  type="button"
-                  size="lg"
-                  disabled={isGenerating}
-                  onClick={() => void runGeneration()}
-                  className="flex-1"
-                >
-                  {isGenerating
-                    ? (() => {
-                        const doneCount = pendingImageSlots.filter(
-                          (s) => s.status === 'done' || s.status === 'error'
-                        ).length;
-                        return `Generating ${doneCount}/${pendingSlots} (${(elapsedMs / 1000).toFixed(0)}s)...`;
-                      })()
-                    : isShotSetActive
-                      ? `Generate shot set (${totalPlannedShots} shots)`
-                      : `Generate ${variations} ${variations === 1 ? 'shot' : 'shots'}`}
-                </Button>
-                {selectedModel.tier === 'paid' ? (
-                  <span className="inline-flex h-10 items-center rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-2.5 font-mono text-[11px] tabular-nums text-[var(--muted-foreground)] whitespace-nowrap shrink-0">
-                    {batchEstimate.label}
-                  </span>
-                ) : null}
-              </div>
-              {selectedModel.tier === 'paid' && batchEstimate.perImageNote ? (
-                <p className="font-mono text-[10px] tabular-nums text-[var(--muted-foreground)]">
-                  {batchEstimate.perImageNote}
-                </p>
-              ) : null}
-            </div>
           </div>
         ) : activeTab === 'library' ? (
           <LibraryView
@@ -3761,6 +3552,24 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
           />
         );
       })()}
+
+      {/* Prompt Inspector Slide-Over Drawer */}
+      <PromptDrawer
+        open={promptDrawerOpen}
+        onOpenChange={setPromptDrawerOpen}
+        autoPrompt={deterministicPrompt}
+        activePrompt={activePrompt}
+        promptEditedManually={promptEditedManually}
+        onEditPrompt={(nextText) => {
+          setManualPromptText(nextText);
+          setPromptEditedManually(true);
+        }}
+        onResetPrompt={() => setPromptEditedManually(false)}
+        enhanceEnabled={enhanceEnabled}
+        isEnhancingPreview={isEnhancingPreview}
+        onPreviewEnhance={handlePreviewEnhance}
+        canEnhance={Boolean(brief.name.trim())}
+      />
 
       {/* Command Palette (Cmd/Ctrl + K) */}
       <CommandPalette

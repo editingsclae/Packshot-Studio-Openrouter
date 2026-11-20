@@ -4,9 +4,10 @@ import {
   DEFAULT_FREE_MODEL_ID,
   type AspectRatio,
   type ModelTier,
+  type QualityModeId,
 } from './models';
 import type { ProductBrief } from './prompt-engine';
-import type { ShotPresetId } from './presets';
+import type { ProductCategoryId, ShotPresetId } from './presets';
 import type { PackshotCheckResult } from './packshot-check';
 
 export type MultiViewId =
@@ -161,10 +162,55 @@ export interface UserPreset {
   customSeed: string;
 }
 
+export interface StudioPanelPreferences {
+  category: ProductCategoryId;
+  shotId: ShotPresetId;
+  qualityMode: QualityModeId;
+  variations: number;
+  panelCollapsed: boolean;
+}
+
+export const DEFAULT_PANEL_PREFS: StudioPanelPreferences = {
+  category: 'home-furniture',
+  shotId: 'marketplace-packshot',
+  qualityMode: 'draft',
+  variations: 2,
+  panelCollapsed: false,
+};
+
 const HISTORY_KEY = 'packshot-studio:history:v1';
 const SETTINGS_KEY = 'packshot-studio:settings:v1';
 const MODEL_COST_STATS_KEY = 'packshot-studio:model-cost-stats:v1';
 const USER_PRESETS_KEY = 'packshot-studio:user-presets:v1';
+const PANEL_PREFS_KEY = 'packshot-studio:panel-prefs:v1';
+
+export async function loadPanelPreferences(): Promise<StudioPanelPreferences> {
+  try {
+    const stored = await get<Partial<StudioPanelPreferences>>(PANEL_PREFS_KEY);
+    if (!stored) return DEFAULT_PANEL_PREFS;
+    return {
+      ...DEFAULT_PANEL_PREFS,
+      ...stored,
+      variations:
+        typeof stored.variations === 'number' && Number.isFinite(stored.variations)
+          ? Math.min(4, Math.max(1, Math.round(stored.variations)))
+          : DEFAULT_PANEL_PREFS.variations,
+      panelCollapsed: Boolean(stored.panelCollapsed),
+    };
+  } catch {
+    return DEFAULT_PANEL_PREFS;
+  }
+}
+
+export async function savePanelPreferences(
+  prefs: StudioPanelPreferences
+): Promise<void> {
+  try {
+    await set(PANEL_PREFS_KEY, prefs);
+  } catch {
+    // Ignore storage issues gracefully
+  }
+}
 
 export async function loadHistory(): Promise<GenerationRecord[]> {
   try {

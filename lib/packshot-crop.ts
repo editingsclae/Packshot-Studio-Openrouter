@@ -508,3 +508,124 @@ export async function downscaleImageToMaxDim(
   return dataUrl;
 }
 
+function toHexByte(n: number): string {
+  return clamp(Math.round(n), 0, 255).toString(16).padStart(2, '0').toUpperCase();
+}
+
+/**
+ * Extracts up to `maxColors` dominant non-background colors from a product image
+ * using client-side canvas sampling. Border pixels determine backdrop color so
+ * studio backgrounds (white, gray, colored sweeps) are excluded.
+ */
+export async function extractDominantColorsFromImage(
+  dataUrl: string,
+  maxColors = 4
+): Promise<string[]> {
+  const img = await loadImageElement(dataUrl);
+  const w0 = Math.max(16, img.naturalWidth || img.width);
+  const h0 = Math.max(16, img.naturalHeight || img.height);
+  const scale = Math.min(1, 160 / Math.max(w0, h0));
+  const w = Math.max(16, Math.round(w0 * scale));
+  const h = Math.max(16, Math.round(h0 * scale));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return [];
+
+  ctx.clearRect(0, 0, w, h);
+  ctx.drawImage(img, 0, 0, w, h);
+  const { data } = ctx.getImageData(0, 0, w, h);
+
+  const margin = Math.max(2, Math.round(Math.min(w, h) * 0.04));
+  const bgR: number[] = [];
+  const bgG: number[] = [];
+  const bgB: number[] = [];
+  let borderTotal = 0;
+  let borderAlpha = 0;
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (x < margin || x >= w - margin || y < margin || y >= h - margin) {
+        const idx = (y * w + x) * 4;
+        borderTotal++;
+        if (data[idx + 3] < 220) {
+          borderAlpha++;
+        } else {
+          bgR.push(data[idx]);
+          bgG.push(data[idx + 1]);
+          bgB.push(data[idx + 2]);
+        }
+      }
+    }
+  }
+
+  const hasAlphaBg = borderTotal > 0 && borderAlpha / borderTotal > 0.2;
+  const medR = bgR.length > 0 ? median(bgR) : 255;
+  const medG = bgG.length > 0 ? median(bgG) : 255;
+  const medB = bgB.length > 0 ? median(bgB) : 255;
+  const isNearWhiteBg = 0.299 * medR + 0.587 * medG + 0.114 * medB >= 235;
+
+  const buckets = new Map<
+    number,
+    { count: number; sumR: number; sumG: number; sumB: number }
+  >();
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const idx = (y * w + x) * 4;
+      const r = data[idx];
+      const g = data[idx + 1];
+      const b = data[idx + 2];
+      const a = data[idx + 3];
+
+      if (a < 180) continue;
+      if (!hasAlphaBg) {
+        const diffBg = Math.max(
+          Math.abs(r - medR),
+          Math.abs(g - medG),
+          Math.abs(b - medB)
+        );
+        const isNearWhite = r >= 238 && g >= 238 && b >= 238;
+        if (isNearWhiteBg && isNearWhite) continue;
+        if (!isNearWhiteBg && diffBg <= 26) continue;
+      }
+
+      const key = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
+      const existing = buckets.get(key);
+      if (existing) {
+        existing.count++;
+        existing.sumR += r;
+        existing.sumG += g;
+        existing.sumB += b;
+      } else {
+        buckets.set(key, { count: 1, sumR: r, sumG: g, sumB: b });
+      }
+    }
+  }
+
+  const sorted = Array.from(buckets.values()).sort((a, b) => b.count - a.count);
+  const chosen: Array<{ r: number; g: number; b: number; hex: string }> = [];
+
+  for (const bucket of sorted) {
+    const r = bucket.sumR / bucket.count;
+    const g = bucket.sumG / bucket.count;
+    const b = bucket.sumB / bucket.count;
+    const tooClose = chosen.some((c) => {
+      const dist = Math.sqrt((r - c.r) ** 2 + (g - c.g) ** 2 + (b - c.b) ** 2);
+      return dist < 44;
+    });
+    if (!tooClose) {
+      chosen.push({
+        r,
+        g,
+        b,
+        hex: `#${toHexByte(r)}${toHexByte(g)}${toHexByte(b)}`,
+      });
+    }
+    if (chosen.length >= maxColors) break;
+  }
+
+  return chosen.map((c) => c.hex);
+}
