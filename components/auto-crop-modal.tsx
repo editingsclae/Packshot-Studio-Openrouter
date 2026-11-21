@@ -19,7 +19,10 @@ import {
   type MarketplaceAlignPresetId,
 } from '@/lib/packshot-crop';
 import type { GeneratedImageItem } from '@/lib/db';
-import type { PackshotCheckResult } from '@/lib/packshot-check';
+import {
+  formatPackshotBackgroundLabel,
+  type PackshotCheckResult,
+} from '@/lib/packshot-check';
 import { StudioModal } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
@@ -407,7 +410,7 @@ export function AutoCropModal({
                     ) : (
                       <XCircle className="h-3.5 w-3.5 text-amber-500" />
                     )}
-                    Pure white border
+                    {formatPackshotBackgroundLabel(displayCheck)}
                   </span>
                   <span className="font-mono tabular-nums text-[var(--foreground)]">
                     {displayCheck.borderWhitePercent}%
@@ -420,10 +423,10 @@ export function AutoCropModal({
                     ) : (
                       <XCircle className="h-3.5 w-3.5 text-amber-500" />
                     )}
-                    Frame occupancy (80–90%)
+                    Product fills {displayCheck.frameFillPercent}% of frame
                   </span>
                   <span className="font-mono tabular-nums text-[var(--foreground)]">
-                    {displayCheck.frameFillPercent}%
+                    80–90%
                   </span>
                 </div>
               </div>

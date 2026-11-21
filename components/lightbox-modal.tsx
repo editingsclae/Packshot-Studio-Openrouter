@@ -23,6 +23,7 @@ import {
   type GeneratedImageItem,
 } from '@/lib/db';
 import { formatUsdCompact, type ModelTier } from '@/lib/models';
+import { formatPackshotBackgroundLabel } from '@/lib/packshot-check';
 import { StudioModal } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -279,7 +280,7 @@ export function LightboxModal({
                     ) : (
                       <XCircle className="h-3.5 w-3.5 text-amber-500" />
                     )}
-                    Background pure white
+                    {formatPackshotBackgroundLabel(image.packshotCheck)}
                   </span>
                   <span className="font-mono tabular-nums">
                     {image.packshotCheck.borderWhitePercent}%
@@ -292,12 +293,15 @@ export function LightboxModal({
                     ) : (
                       <XCircle className="h-3.5 w-3.5 text-amber-500" />
                     )}
-                    Product fills 80-90% of frame
+                    Product fills {image.packshotCheck.frameFillPercent}% of frame
                   </span>
-                  <span className="font-mono tabular-nums">
-                    {image.packshotCheck.frameFillPercent}%
-                  </span>
+                  <span className="font-mono tabular-nums">80–90%</span>
                 </div>
+                {!image.packshotCheck.borderPureWhitePass ? (
+                  <p className="pt-0.5 text-[11px] text-[var(--muted-foreground)]">
+                    Auto-Center will whiten the background
+                  </p>
+                ) : null}
               </div>
             ) : null}
 

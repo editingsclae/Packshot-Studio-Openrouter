@@ -1,7 +1,9 @@
 import {
   getCategorySpec,
+  getPackshotBackgroundText,
   getShotPreset,
   REFINE_CHIPS,
+  type PackshotBackgroundVariant,
   type ProductCategoryId,
   type ShotPresetId,
 } from './presets';
@@ -21,6 +23,7 @@ export interface ProductBrief {
 export interface PromptBuildOptions {
   refineChipIds?: string[];
   allowPeople?: boolean;
+  packshotBackgroundVariant?: PackshotBackgroundVariant;
 }
 
 export interface SampleBriefPreset {
@@ -407,7 +410,8 @@ export function buildPrompt(
   const cleanShotBackground = shot.background.replace(/\s*\(#?[0-9a-fA-F]{6}\)/g, '');
   let backgroundSentence = '';
   if (shot.id === 'marketplace-packshot') {
-    backgroundSentence = `${cleanShotBackground}.`;
+    const packshotBg = getPackshotBackgroundText(options.packshotBackgroundVariant);
+    backgroundSentence = `${packshotBg}.`;
   } else if (
     brief.useBackgroundColor &&
     /^#[0-9a-fA-F]{6}$/.test(brief.backgroundColor.trim())

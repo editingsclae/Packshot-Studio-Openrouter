@@ -26,6 +26,7 @@ import {
   type GeneratedImageItem,
 } from '@/lib/db';
 import { formatUsdCompact } from '@/lib/models';
+import { formatPackshotBackgroundLabel } from '@/lib/packshot-check';
 import { cn } from '@/lib/utils';
 
 const DEGRADED_LABELS: Record<string, string> = {
@@ -255,71 +256,82 @@ export function ImageResultCard({
             <span>SVG output — canvas packshot check skipped</span>
           </div>
         ) : isWhiteBackgroundShot && check ? (
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border)] pb-2.5">
-            <div className="flex flex-wrap items-center gap-2 text-[11px]">
-              <span
-                className={cn(
-                  'inline-flex items-center gap-1 rounded-[6px] border px-2 py-0.5 font-medium',
-                  check.borderPureWhitePass
-                    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-500'
-                    : 'border-amber-500/30 bg-amber-500/10 text-amber-500'
-                )}
-              >
-                {check.borderPureWhitePass ? (
-                  <CheckCircle2 className="h-3 w-3 shrink-0" />
-                ) : (
-                  <XCircle className="h-3 w-3 shrink-0" />
-                )}
-                <span>Background pure white</span>
-                <span className="font-mono tabular-nums opacity-80">
-                  {check.borderWhitePercent}%
+          <div className="space-y-1.5 border-b border-[var(--border)] pb-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                <span
+                  title={
+                    check.backgroundHex
+                      ? `Sampled border median: ${check.backgroundHex} (${check.borderWhitePercent}% pure white)`
+                      : undefined
+                  }
+                  className={cn(
+                    'inline-flex items-center gap-1 rounded-[6px] border px-2 py-0.5 font-medium',
+                    check.borderPureWhitePass
+                      ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-500'
+                      : 'border-amber-500/30 bg-amber-500/10 text-amber-500'
+                  )}
+                >
+                  {check.borderPureWhitePass ? (
+                    <CheckCircle2 className="h-3 w-3 shrink-0" />
+                  ) : (
+                    <XCircle className="h-3 w-3 shrink-0" />
+                  )}
+                  <span>{formatPackshotBackgroundLabel(check)}</span>
+                  <span className="font-mono tabular-nums opacity-80">
+                    {check.borderWhitePercent}%
+                  </span>
                 </span>
-              </span>
 
-              <span
-                className={cn(
-                  'inline-flex items-center gap-1 rounded-[6px] border px-2 py-0.5 font-medium',
-                  check.frameFillPass
-                    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-500'
-                    : 'border-amber-500/30 bg-amber-500/10 text-amber-500'
-                )}
-              >
-                {check.frameFillPass ? (
-                  <CheckCircle2 className="h-3 w-3 shrink-0" />
-                ) : (
-                  <XCircle className="h-3 w-3 shrink-0" />
-                )}
-                <span>Product fills 80-90% of frame</span>
-                <span className="font-mono tabular-nums opacity-80">
-                  {check.frameFillPercent}%
+                <span
+                  title="Target product occupancy: 80–90% of frame"
+                  className={cn(
+                    'inline-flex items-center gap-1 rounded-[6px] border px-2 py-0.5 font-medium',
+                    check.frameFillPass
+                      ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-500'
+                      : 'border-amber-500/30 bg-amber-500/10 text-amber-500'
+                  )}
+                >
+                  {check.frameFillPass ? (
+                    <CheckCircle2 className="h-3 w-3 shrink-0" />
+                  ) : (
+                    <XCircle className="h-3 w-3 shrink-0" />
+                  )}
+                  <span>Product fills {check.frameFillPercent}% of frame</span>
                 </span>
-              </span>
-            </div>
+              </div>
 
-            {checkFailed ? (
-              <div className="flex items-center gap-1.5">
-                {onAutoCenter ? (
+              {checkFailed ? (
+                <div className="flex items-center gap-1.5">
+                  {onAutoCenter ? (
+                    <button
+                      type="button"
+                      disabled={isGenerating || isAligning}
+                      onClick={onAutoCenter}
+                      title={`Auto-crop, whiten light background, and center to ${alignPresetLabel}`}
+                      className="inline-flex h-7 items-center gap-1.5 rounded-[6px] border border-[var(--foreground)] bg-[var(--foreground)] px-2.5 text-[11px] font-medium text-[var(--background)] hover:opacity-90 disabled:opacity-40 cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      <Crop className="h-3 w-3" />
+                      <span>{isAligning ? 'Aligning...' : 'Auto-Center'}</span>
+                    </button>
+                  ) : null}
                   <button
                     type="button"
-                    disabled={isGenerating || isAligning}
-                    onClick={onAutoCenter}
-                    title={`Auto-crop and center to ${alignPresetLabel}`}
-                    className="inline-flex h-7 items-center gap-1.5 rounded-[6px] border border-[var(--foreground)] bg-[var(--foreground)] px-2.5 text-[11px] font-medium text-[var(--background)] hover:opacity-90 disabled:opacity-40 cursor-pointer whitespace-nowrap shrink-0"
+                    disabled={isGenerating}
+                    onClick={onRegenerateFailedCheck}
+                    className="inline-flex h-7 items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-2.5 text-[11px] font-medium text-[var(--foreground)] hover:border-[var(--border-hover)] disabled:opacity-40 cursor-pointer whitespace-nowrap shrink-0"
                   >
-                    <Crop className="h-3 w-3" />
-                    <span>{isAligning ? 'Aligning...' : 'Auto-Center'}</span>
+                    <RefreshCw className="h-3 w-3" />
+                    <span>Regenerate</span>
                   </button>
-                ) : null}
-                <button
-                  type="button"
-                  disabled={isGenerating}
-                  onClick={onRegenerateFailedCheck}
-                  className="inline-flex h-7 items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-2.5 text-[11px] font-medium text-[var(--foreground)] hover:border-[var(--border-hover)] disabled:opacity-40 cursor-pointer whitespace-nowrap shrink-0"
-                >
-                  <RefreshCw className="h-3 w-3" />
-                  <span>Regenerate</span>
-                </button>
-              </div>
+                </div>
+              ) : null}
+            </div>
+
+            {!check.borderPureWhitePass ? (
+              <p className="text-[11px] text-[var(--muted-foreground)]">
+                Auto-Center will whiten the background
+              </p>
             ) : null}
           </div>
         ) : null}

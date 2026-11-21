@@ -1,4 +1,9 @@
-import { analyzePackshotImage, type PackshotCheckResult } from './packshot-check';
+import {
+  analyzePackshotImage,
+  deltaELab,
+  rgbToLab,
+  type PackshotCheckResult,
+} from './packshot-check';
 
 export type MarketplaceAlignPresetId =
   | 'amazon'
@@ -71,6 +76,7 @@ export interface AutoCropOptions {
   targetFill: number; // 0.65 - 0.94
   canvasMode: AlignCanvasMode;
   backdropMode: AlignBackdropMode;
+  flattenLightBackground?: boolean;
 }
 
 export interface AutoCropResult {
@@ -112,8 +118,9 @@ function loadImageElement(src: string): Promise<HTMLImageElement> {
 
 /**
  * Client-side auto-crop and object-centering engine.
- * Detects the product bounding box relative to backdrop/alpha, crops cleanly
- * without clipping anti-aliased edges, and centers + scales to exact marketplace targets.
+ * Detects the product bounding box relative to sampled border color (Delta-E ~12),
+ * flattens low-saturation light backgrounds (luminance >= 200) to #FFFFFF while keeping
+ * soft contact shadows, and centers + scales to exact marketplace targets.
  */
 export async function autoCropAndCenterImage(
   sourceDataUrl: string,
@@ -140,7 +147,8 @@ export async function autoCropAndCenterImage(
   actx.drawImage(img, 0, 0, aw, ah);
   const { data } = actx.getImageData(0, 0, aw, ah);
 
-  const borderMargin = Math.max(3, Math.round(Math.min(aw, ah) * 0.025));
+  const borderMargin = Math.max(4, Math.round(Math.min(aw, ah) * 0.03));
+  const cornerSize = Math.max(8, Math.round(Math.min(aw, ah) * 0.06));
   const borderR: number[] = [];
   const borderG: number[] = [];
   const borderB: number[] = [];
@@ -149,12 +157,15 @@ export async function autoCropAndCenterImage(
 
   for (let y = 0; y < ah; y++) {
     for (let x = 0; x < aw; x++) {
-      const isBorder =
+      const isEdgeStrip =
         x < borderMargin ||
         x >= aw - borderMargin ||
         y < borderMargin ||
         y >= ah - borderMargin;
-      if (!isBorder) continue;
+      const isCorner =
+        (x < cornerSize || x >= aw - cornerSize) &&
+        (y < cornerSize || y >= ah - cornerSize);
+      if (!isEdgeStrip && !isCorner) continue;
 
       const idx = (y * aw + x) * 4;
       const a = data[idx + 3];
@@ -176,49 +187,42 @@ export async function autoCropAndCenterImage(
   const bgG = borderG.length > 0 ? median(borderG) : 255;
   const bgB = borderB.length > 0 ? median(borderB) : 255;
   const bgLuminance = 0.299 * bgR + 0.587 * bgG + 0.114 * bgB;
+  const bgSpread = Math.max(bgR, bgG, bgB) - Math.min(bgR, bgG, bgB);
+  const bgLab = rgbToLab(bgR, bgG, bgB);
 
-  // Estimate subtle gradient / compression noise on the border
-  const borderDiffs: number[] = [];
+  const isLowSatLightBg =
+    !hasAlphaBackdrop && bgLuminance >= 200 && bgSpread <= 28;
+  const flattenLightBgToWhite =
+    isLowSatLightBg &&
+    (options.backdropMode === 'pure-white' ||
+      Boolean(options.flattenLightBackground));
+
+  // Estimate subtle gradient / compression noise on the border in Lab Delta-E
+  const borderDeltaEs: number[] = [];
   for (let i = 0; i < borderR.length; i++) {
-    const d = Math.max(
-      Math.abs(borderR[i] - bgR),
-      Math.abs(borderG[i] - bgG),
-      Math.abs(borderB[i] - bgB)
-    );
-    borderDiffs.push(d);
+    borderDeltaEs.push(deltaELab(rgbToLab(borderR[i], borderG[i], borderB[i]), bgLab));
   }
-  borderDiffs.sort((a, b) => a - b);
-  const p90Diff =
-    borderDiffs.length > 0
-      ? borderDiffs[Math.floor(borderDiffs.length * 0.9)]
-      : 6;
-  const diffThreshold = clamp(p90Diff + 12, 18, 42);
+  borderDeltaEs.sort((a, b) => a - b);
+  const p90DeltaE =
+    borderDeltaEs.length > 0
+      ? borderDeltaEs[Math.floor(borderDeltaEs.length * 0.9)]
+      : 4;
+  const deltaEThreshold = clamp(Math.max(12, p90DeltaE + 3), 12, 18);
 
-  // Build row/col occupancy counts
+  // Build row/col occupancy counts using Delta-E from sampled background
   const rowCounts = new Int32Array(ah);
   const colCounts = new Int32Array(aw);
-  const isNearWhiteBg = bgLuminance >= 236;
 
   for (let y = 0; y < ah; y++) {
     for (let x = 0; x < aw; x++) {
       const idx = (y * aw + x) * 4;
-      const r = data[idx];
-      const g = data[idx + 1];
-      const b = data[idx + 2];
       const a = data[idx + 3];
-
       let isForeground = false;
       if (hasAlphaBackdrop) {
         isForeground = a >= 24;
       } else if (a >= 24) {
-        const diff = Math.max(
-          Math.abs(r - bgR),
-          Math.abs(g - bgG),
-          Math.abs(b - bgB)
-        );
-        if (diff > diffThreshold) {
-          isForeground = true;
-        } else if (isNearWhiteBg && (r < 236 || g < 236 || b < 236)) {
+        const pxLab = rgbToLab(data[idx], data[idx + 1], data[idx + 2]);
+        if (deltaELab(pxLab, bgLab) > deltaEThreshold) {
           isForeground = true;
         }
       }
@@ -230,8 +234,8 @@ export async function autoCropAndCenterImage(
     }
   }
 
-  const minRowHits = Math.max(2, Math.floor(aw * 0.006));
-  const minColHits = Math.max(2, Math.floor(ah * 0.006));
+  const minRowHits = Math.max(2, Math.floor(aw * 0.005));
+  const minColHits = Math.max(2, Math.floor(ah * 0.005));
 
   let minX = aw;
   let maxX = -1;
@@ -311,8 +315,8 @@ export async function autoCropAndCenterImage(
   const destX = Math.round((outW - destW) / 2);
   const destY = Math.round((outH - destH) / 2);
 
-  // 3. Extract cropped region onto scratch canvas and softly feather outer edge
-  //    so off-white studio backgrounds melt seamlessly into #FFFFFF with zero seam lines.
+  // 3. Extract cropped region onto scratch canvas, whiten connected low-sat light background
+  //    to #FFFFFF while keeping soft contact shadow beneath the product intact.
   const cropCanvas = document.createElement('canvas');
   cropCanvas.width = srcW;
   cropCanvas.height = srcH;
@@ -327,42 +331,134 @@ export async function autoCropAndCenterImage(
     const cropImg = cctx.getImageData(0, 0, srcW, srcH);
     const cd = cropImg.data;
     const featherPx = clamp(Math.round(Math.min(srcW, srcH) * 0.02), 3, 14);
-    const softenNearWhite =
-      options.backdropMode === 'pure-white' && bgLuminance >= 215;
 
-    for (let y = 0; y < srcH; y++) {
-      const edgeDistY = Math.min(y, srcH - 1 - y);
+    if (flattenLightBgToWhite) {
+      // Flood-fill from the crop perimeter across low-saturation light background pixels
+      // so interior white highlights on white products are untouched while background becomes #FFFFFF.
+      const totalPx = srcW * srcH;
+      const visited = new Uint8Array(totalPx);
+      const isBgSeed = new Uint8Array(totalPx);
+      const queue = new Int32Array(totalPx);
+      let qHead = 0;
+      let qTail = 0;
+
+      const isBackgroundPixel = (offset: number): boolean => {
+        const r = cd[offset];
+        const g = cd[offset + 1];
+        const b = cd[offset + 2];
+        const spread = Math.max(r, g, b) - Math.min(r, g, b);
+        const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+        if (lum < 192 || spread > 30) return false;
+        const pxDelta = deltaELab(rgbToLab(r, g, b), bgLab);
+        return pxDelta <= Math.max(deltaEThreshold, 13);
+      };
+
+      const tryEnqueue = (x: number, y: number) => {
+        const p = y * srcW + x;
+        if (visited[p]) return;
+        visited[p] = 1;
+        if (isBackgroundPixel(p * 4)) {
+          isBgSeed[p] = 1;
+          queue[qTail++] = p;
+        }
+      };
+
       for (let x = 0; x < srcW; x++) {
-        const edgeDistX = Math.min(x, srcW - 1 - x);
-        const edgeDist = Math.min(edgeDistX, edgeDistY);
-        const idx = (y * srcW + x) * 4;
-        const r = cd[idx];
-        const g = cd[idx + 1];
-        const b = cd[idx + 2];
+        tryEnqueue(x, 0);
+        tryEnqueue(x, srcH - 1);
+      }
+      for (let y = 1; y < srcH - 1; y++) {
+        tryEnqueue(0, y);
+        tryEnqueue(srcW - 1, y);
+      }
 
-        const distFromBg = Math.max(
-          Math.abs(r - bgR),
-          Math.abs(g - bgG),
-          Math.abs(b - bgB)
-        );
+      while (qHead < qTail) {
+        const p = queue[qHead++];
+        const x = p % srcW;
+        const y = (p - x) / srcW;
+        if (x > 0) tryEnqueue(x - 1, y);
+        if (x < srcW - 1) tryEnqueue(x + 1, y);
+        if (y > 0) tryEnqueue(x, y - 1);
+        if (y < srcH - 1) tryEnqueue(x, y + 1);
+      }
 
-        // Gently clean near-backdrop pixels right at the outer crop edge
-        if (edgeDist < featherPx && distFromBg <= diffThreshold + 8) {
-          const t = edgeDist / featherPx;
-          cd[idx + 3] = Math.round(cd[idx + 3] * t);
-        } else if (
-          softenNearWhite &&
-          distFromBg <= 12 &&
-          r >= 244 &&
-          g >= 244 &&
-          b >= 244
-        ) {
-          cd[idx] = 255;
-          cd[idx + 1] = 255;
-          cd[idx + 2] = 255;
+      // Flatten connected background AND smoothly feather low-saturation contact shadow transitions into #FFFFFF
+      for (let y = 0; y < srcH; y++) {
+        const edgeDistY = Math.min(y, srcH - 1 - y);
+        for (let x = 0; x < srcW; x++) {
+          const edgeDistX = Math.min(x, srcW - 1 - x);
+          const edgeDist = Math.min(edgeDistX, edgeDistY);
+          const p = y * srcW + x;
+          const idx = p * 4;
+          const r = cd[idx];
+          const g = cd[idx + 1];
+          const b = cd[idx + 2];
+
+          if (isBgSeed[p]) {
+            cd[idx] = 255;
+            cd[idx + 1] = 255;
+            cd[idx + 2] = 255;
+            cd[idx + 3] = 0;
+            continue;
+          }
+
+          const spread = Math.max(r, g, b) - Math.min(r, g, b);
+          const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+          const pxDelta = deltaELab(rgbToLab(r, g, b), bgLab);
+
+          // Closed interior background voids (e.g. inside handles) matching border color tightly
+          if (
+            pxDelta <= 8 &&
+            spread <= 20 &&
+            lum >= 198 &&
+            Math.abs(lum - bgLuminance) <= 10
+          ) {
+            cd[idx] = 255;
+            cd[idx + 1] = 255;
+            cd[idx + 2] = 255;
+            cd[idx + 3] = 0;
+            continue;
+          }
+
+          // Preserve soft contact shadow while normalizing neutral shadow tail smoothly toward #FFFFFF
+          if (
+            y >= srcH * 0.55 &&
+            spread <= 22 &&
+            lum > bgLuminance - 60 &&
+            lum < bgLuminance + 8 &&
+            bgLuminance < 252
+          ) {
+            // Remap neutral shadow luminance linearly from [bgLum-60..bgLum] -> [lum..255]
+            const denom = Math.max(12, bgLuminance - 4);
+            const normalized = clamp(lum / denom, 0, 1);
+            const targetShadowLum = lum + (255 - bgLuminance) * Math.pow(normalized, 1.3);
+            const deltaLum = Math.max(0, targetShadowLum - lum);
+            cd[idx] = Math.min(255, Math.round(r + deltaLum));
+            cd[idx + 1] = Math.min(255, Math.round(g + deltaLum));
+            cd[idx + 2] = Math.min(255, Math.round(b + deltaLum));
+          } else if (edgeDist < featherPx && pxDelta <= deltaEThreshold + 6) {
+            const t = edgeDist / featherPx;
+            cd[idx + 3] = Math.round(cd[idx + 3] * t);
+          }
+        }
+      }
+    } else {
+      for (let y = 0; y < srcH; y++) {
+        const edgeDistY = Math.min(y, srcH - 1 - y);
+        for (let x = 0; x < srcW; x++) {
+          const edgeDistX = Math.min(x, srcW - 1 - x);
+          const edgeDist = Math.min(edgeDistX, edgeDistY);
+          const idx = (y * srcW + x) * 4;
+          const pxDelta = deltaELab(rgbToLab(cd[idx], cd[idx + 1], cd[idx + 2]), bgLab);
+
+          if (edgeDist < featherPx && pxDelta <= deltaEThreshold + 4) {
+            const t = edgeDist / featherPx;
+            cd[idx + 3] = Math.round(cd[idx + 3] * t);
+          }
         }
       }
     }
+
     cctx.putImageData(cropImg, 0, 0);
   }
 
@@ -375,10 +471,11 @@ export async function autoCropAndCenterImage(
     throw new Error('Output canvas context unavailable');
   }
 
-  octx.fillStyle =
-    options.backdropMode === 'pure-white'
-      ? '#FFFFFF'
-      : `rgb(${bgR}, ${bgG}, ${bgB})`;
+  const useWhiteCanvas =
+    options.backdropMode === 'pure-white' || flattenLightBgToWhite;
+  octx.fillStyle = useWhiteCanvas
+    ? '#FFFFFF'
+    : `rgb(${bgR}, ${bgG}, ${bgB})`;
   octx.fillRect(0, 0, outW, outH);
 
   octx.imageSmoothingEnabled = true;

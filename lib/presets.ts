@@ -179,6 +179,28 @@ export interface ShotPresetSpec {
   background: string;
 }
 
+export type PackshotBackgroundVariant = 'high-key' | 'legacy-cyclorama';
+
+export const HIGH_KEY_PACKSHOT_BACKGROUND =
+  'High-key studio lighting with the backdrop fully blown out to clean pure white, no gray gradient, no vignette, no horizon line, no background shadow except a soft contact shadow under the product';
+
+export const LEGACY_PACKSHOT_BACKGROUND =
+  'Pure seamless solid white cyclorama studio background, zero vignette, zero horizon line';
+
+export function getPackshotBackgroundText(
+  variant?: PackshotBackgroundVariant
+): string {
+  const resolved =
+    variant ??
+    (typeof process !== 'undefined' &&
+    process.env.NEXT_PUBLIC_PACKSHOT_BG_VARIANT === 'legacy-cyclorama'
+      ? 'legacy-cyclorama'
+      : 'high-key');
+  return resolved === 'legacy-cyclorama'
+    ? LEGACY_PACKSHOT_BACKGROUND
+    : HIGH_KEY_PACKSHOT_BACKGROUND;
+}
+
 export const SHOT_PRESETS: ShotPresetSpec[] = [
   {
     id: 'marketplace-packshot',
@@ -192,7 +214,7 @@ export const SHOT_PRESETS: ShotPresetSpec[] = [
     camera: '85mm commercial studio lens at f/11, eye-level perspective, razor-sharp front-to-back focus',
     lighting:
       'Soft, ultra-even diffused dual-softbox commercial studio lighting with controlled specular wrap and a subtle natural ground contact shadow directly beneath the base',
-    background: 'Pure seamless solid white (#FFFFFF) cyclorama studio background, zero vignette, zero horizon line',
+    background: HIGH_KEY_PACKSHOT_BACKGROUND,
   },
   {
     id: 'studio-hero',
@@ -202,7 +224,7 @@ export const SHOT_PRESETS: ShotPresetSpec[] = [
     defaultAspectRatio: '4:5',
     isWhiteBackground: false,
     composition:
-      'Hero three-quarter low-eye-level angle, centered slightly grounded in lower two-thirds, sculptural silhouette commanding the frame',
+      'Hero three-quarter low-eye-level angle, product fills about 65% of the frame height, centered, with generous negative space, sculptural silhouette commanding the frame',
     camera: '90mm medium-format studio lens at f/5.6, crisp subject isolation',
     lighting:
       'Large diffused overhead softbox key light, subtle directional rim light separating edges from backdrop, soft grounded reflections on the surface plane',

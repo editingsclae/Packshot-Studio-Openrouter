@@ -39,6 +39,12 @@ import { StepProduct } from '@/components/panel/step-product';
 import { StepShot } from '@/components/panel/step-shot';
 import { StepOutput } from '@/components/panel/step-output';
 import { StickyGenerateBar } from '@/components/panel/sticky-generate-bar';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 
 export type AccordionStepNumber = 1 | 2 | 3;
@@ -479,55 +485,79 @@ export function LeftControlPanel({
               </span>
             </button>
 
-            <button
-              type="button"
-              role="tab"
-              aria-selected={inputMode === 'photo'}
-              disabled={photoModeDisabled}
-              onClick={() => {
-                if (!photoModeDisabled) onInputModeChange('photo');
-              }}
-              className={cn(
-                'flex flex-col items-start rounded-[7px] px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3]',
-                photoModeDisabled
-                  ? 'opacity-45 cursor-not-allowed text-[var(--muted-foreground)]'
-                  : inputMode === 'photo'
+            {photoModeDisabled ? (
+              <TooltipProvider delayDuration={150}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span
+                      className="flex cursor-not-allowed"
+                      title={
+                        hasAnyReferenceCapableModel
+                          ? `${selectedModel.name} has no reference support. Switch to a model that does.`
+                          : `${selectedModel.name} has no reference support.`
+                      }
+                    >
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={inputMode === 'photo'}
+                        disabled={true}
+                        className="pointer-events-none flex w-full flex-col items-start rounded-[7px] px-2.5 py-2 text-left text-[var(--muted-foreground)] opacity-45"
+                      >
+                        <span className="text-[12px] font-semibold leading-tight">
+                          From photo
+                        </span>
+                        <span className="mt-0.5 text-[10px] leading-tight text-[var(--muted-foreground)]">
+                          Upload your product photo
+                        </span>
+                      </button>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="space-y-1.5 text-[11px]">
+                    <p className="text-[var(--muted-foreground)]">
+                      {selectedModel.name} has no reference support
+                    </p>
+                    {hasAnyReferenceCapableModel ? (
+                      <button
+                        type="button"
+                        onClick={onSwitchToReferenceModelAndPhotoMode}
+                        className="font-medium text-[#0070f3] hover:underline cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3] rounded-[3px]"
+                      >
+                        Switch to a model that does
+                      </button>
+                    ) : null}
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            ) : (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={inputMode === 'photo'}
+                onClick={() => onInputModeChange('photo')}
+                className={cn(
+                  'flex flex-col items-start rounded-[7px] px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3]',
+                  inputMode === 'photo'
                     ? 'bg-[var(--foreground)] text-[var(--background)] cursor-pointer'
                     : 'text-[var(--foreground)] hover:bg-[var(--card)] cursor-pointer'
-              )}
-            >
-              <span className="text-[12px] font-semibold leading-tight">
-                From photo
-              </span>
-              <span
-                className={cn(
-                  'mt-0.5 text-[10px] leading-tight',
-                  inputMode === 'photo' && !photoModeDisabled
-                    ? 'opacity-80'
-                    : 'text-[var(--muted-foreground)]'
                 )}
               >
-                Upload your product photo
-              </span>
-            </button>
-          </div>
-
-          {photoModeDisabled ? (
-            <div className="flex flex-wrap items-center justify-between gap-2 rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-[11px]">
-              <span className="text-[var(--muted-foreground)]">
-                {selectedModel.name} has no reference support
-              </span>
-              {hasAnyReferenceCapableModel ? (
-                <button
-                  type="button"
-                  onClick={onSwitchToReferenceModelAndPhotoMode}
-                  className="font-medium text-[#0070f3] hover:underline cursor-pointer shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3] rounded-[3px]"
+                <span className="text-[12px] font-semibold leading-tight">
+                  From photo
+                </span>
+                <span
+                  className={cn(
+                    'mt-0.5 text-[10px] leading-tight',
+                    inputMode === 'photo'
+                      ? 'opacity-80'
+                      : 'text-[var(--muted-foreground)]'
+                  )}
                 >
-                  Switch to a model that does
-                </button>
-              ) : null}
-            </div>
-          ) : null}
+                  Upload your product photo
+                </span>
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Step 1: Product */}

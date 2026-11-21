@@ -2026,6 +2026,7 @@ export function StudioApp({
             targetFill: preset.targetFill,
             canvasMode: preset.canvasMode,
             backdropMode: preset.backdropMode,
+            flattenLightBackground: true,
           });
           patchImageInStores(record.id, img.id, (current) => ({
             ...current,
