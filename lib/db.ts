@@ -67,10 +67,26 @@ export interface GeneratedImageItem {
   consistency?: MultiViewConsistencyResult;
 }
 
+export interface BriefSnapshot {
+  name: string;
+  category: ProductCategoryId;
+  shotId: ShotPresetId;
+  modelId: string;
+}
+
+export function cloneProductBrief(brief: ProductBrief): ProductBrief {
+  return {
+    ...brief,
+    colors: [...(brief.colors ?? [])],
+    onProductTexts: [...(brief.onProductTexts ?? [])],
+  };
+}
+
 export interface GenerationRecord {
   id: string;
   createdAt: number;
   brief: ProductBrief;
+  briefSnapshot?: BriefSnapshot;
   shotId: ShotPresetId;
   modelId: string;
   modelTier?: ModelTier;
@@ -178,11 +194,63 @@ export const DEFAULT_PANEL_PREFS: StudioPanelPreferences = {
   panelCollapsed: false,
 };
 
+export interface StudioBriefDraft {
+  brief: ProductBrief;
+  categoryManuallyOverridden: boolean;
+  enhanceEnabled?: boolean;
+  activeRefineChips?: string[];
+  shotId?: ShotPresetId;
+  modelId?: string;
+  aspectRatio?: AspectRatio;
+  ratioOverrideActive?: boolean;
+  updatedAt: number;
+}
+
 const HISTORY_KEY = 'packshot-studio:history:v1';
 const SETTINGS_KEY = 'packshot-studio:settings:v1';
 const MODEL_COST_STATS_KEY = 'packshot-studio:model-cost-stats:v1';
 const USER_PRESETS_KEY = 'packshot-studio:user-presets:v1';
 const PANEL_PREFS_KEY = 'packshot-studio:panel-prefs:v1';
+const BRIEF_DRAFT_KEY = 'packshot-studio:brief-draft:v1';
+
+export async function loadBriefDraft(): Promise<StudioBriefDraft | null> {
+  try {
+    const stored = await get<Partial<StudioBriefDraft>>(BRIEF_DRAFT_KEY);
+    if (!stored || !stored.brief || typeof stored.brief !== 'object') {
+      return null;
+    }
+    return {
+      brief: cloneProductBrief(stored.brief),
+      categoryManuallyOverridden: Boolean(stored.categoryManuallyOverridden),
+      enhanceEnabled: Boolean(stored.enhanceEnabled),
+      activeRefineChips: Array.isArray(stored.activeRefineChips)
+        ? stored.activeRefineChips.filter((c): c is string => typeof c === 'string')
+        : [],
+      shotId: typeof stored.shotId === 'string' ? stored.shotId : undefined,
+      modelId: typeof stored.modelId === 'string' ? stored.modelId : undefined,
+      aspectRatio:
+        typeof stored.aspectRatio === 'string' ? stored.aspectRatio : undefined,
+      ratioOverrideActive:
+        typeof stored.ratioOverrideActive === 'boolean'
+          ? stored.ratioOverrideActive
+          : undefined,
+      updatedAt:
+        typeof stored.updatedAt === 'number' && Number.isFinite(stored.updatedAt)
+          ? stored.updatedAt
+          : Date.now(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function saveBriefDraft(draft: StudioBriefDraft): Promise<void> {
+  try {
+    await set(BRIEF_DRAFT_KEY, draft);
+  } catch {
+    // Ignore storage issues gracefully
+  }
+}
 
 export async function loadPanelPreferences(): Promise<StudioPanelPreferences> {
   try {

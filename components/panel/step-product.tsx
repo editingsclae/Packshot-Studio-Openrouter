@@ -81,6 +81,58 @@ function FieldHelpTooltip({ label, text }: { label: string; text: string }) {
   );
 }
 
+function AutoGrowTextarea({
+  value,
+  className,
+  onChange,
+  ...props
+}: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
+  const innerRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const syncHeight = () => {
+    const el = innerRef.current;
+    if (!el || typeof window === 'undefined') return;
+    const cs = window.getComputedStyle(el);
+    const lineHeight = parseFloat(cs.lineHeight) || 18;
+    const padTop = parseFloat(cs.paddingTop) || 8;
+    const padBottom = parseFloat(cs.paddingBottom) || 8;
+    const borderTop = parseFloat(cs.borderTopWidth) || 1;
+    const borderBottom = parseFloat(cs.borderBottomWidth) || 1;
+    const minHeight = Math.ceil(
+      lineHeight * 2 + padTop + padBottom + borderTop + borderBottom
+    );
+    const maxHeight = Math.ceil(
+      lineHeight * 5 + padTop + padBottom + borderTop + borderBottom
+    );
+    el.style.height = 'auto';
+    const contentHeight = el.scrollHeight + borderTop + borderBottom;
+    const nextHeight = Math.min(maxHeight, Math.max(minHeight, contentHeight));
+    el.style.height = `${nextHeight}px`;
+    el.style.overflowY = contentHeight > maxHeight ? 'auto' : 'hidden';
+  };
+
+  useEffect(() => {
+    syncHeight();
+  }, [value]);
+
+  return (
+    <Textarea
+      ref={innerRef}
+      rows={2}
+      value={value}
+      onChange={(e) => {
+        onChange?.(e);
+        syncHeight();
+      }}
+      className={cn(
+        'min-h-0 resize-none text-[12px] leading-[1.45] overflow-y-hidden',
+        className
+      )}
+      {...props}
+    />
+  );
+}
+
 export function StepProduct({
   brief,
   onChange,
@@ -646,39 +698,39 @@ export function StepProduct({
       ) : null}
 
       {/* "More details (optional)" collapsible + completeness meter */}
-      <div className="rounded-[8px] border border-[var(--border)] bg-[var(--surface)]/50">
+      <div className="border-t border-[var(--border)] pt-2.5">
         <button
           type="button"
           aria-expanded={moreOpen}
           onClick={() => setMoreOpen((prev) => !prev)}
-          className="flex w-full items-center justify-between gap-2 px-2.5 py-2 text-left cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3] rounded-[8px]"
+          className="flex w-full items-center justify-between gap-2 py-1 text-left cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3] rounded-[4px]"
         >
-          <div className="min-w-0 flex-1 space-y-1">
-            <div className="flex items-center justify-between gap-2">
+          <span className="block min-w-0 flex-1 space-y-1">
+            <span className="flex items-center justify-between gap-2">
               <span className="text-[12px] font-medium text-[var(--foreground)]">
                 More details (optional)
               </span>
               <span className="font-mono text-[10px] tabular-nums text-[var(--muted-foreground)]">
                 {completedCount}/4
               </span>
-            </div>
+            </span>
 
-            <div className="h-1 w-full overflow-hidden rounded-full bg-[var(--border)]">
-              <div
+            <span className="block h-1 w-full overflow-hidden rounded-full bg-[var(--border)]">
+              <span
                 className={cn(
-                  'h-full transition-all duration-150',
+                  'block h-full transition-all duration-150',
                   hasMaterial && hasColors ? 'bg-emerald-500' : 'bg-[var(--foreground)]'
                 )}
                 style={{ width: `${Math.max(8, completenessPct)}%` }}
               />
-            </div>
+            </span>
 
             {(!hasMaterial || !hasColors) ? (
-              <p className="text-[10px] text-[var(--muted-foreground)]">
+              <span className="block text-[10px] text-[var(--muted-foreground)]">
                 Add material and colors for more accurate results
-              </p>
+              </span>
             ) : null}
-          </div>
+          </span>
 
           <ChevronDown
             className={cn(
@@ -695,7 +747,7 @@ export function StepProduct({
           )}
         >
           <div className="overflow-hidden">
-            <div className="border-t border-[var(--border)] px-2.5 py-3 space-y-3.5">
+            <div className="pt-3 space-y-3.5">
               {/* Material & Finish */}
               <div className="space-y-1">
                 <div className="flex items-center gap-1.5">
@@ -705,7 +757,7 @@ export function StepProduct({
                     text="Specifies surface luster (matte, brushed, frosted glass) so lighting highlights look physically real."
                   />
                 </div>
-                <Input
+                <AutoGrowTextarea
                   id="material-finish"
                   value={brief.materialFinish}
                   onChange={(e) => updateField('materialFinish', e.target.value)}
@@ -776,12 +828,11 @@ export function StepProduct({
               {/* Key Features */}
               <div className="space-y-1">
                 <Label htmlFor="key-features">Key features</Label>
-                <Textarea
+                <AutoGrowTextarea
                   id="key-features"
                   value={brief.keyFeatures}
                   onChange={(e) => updateField('keyFeatures', e.target.value)}
                   placeholder="Concise physical details: spout geometry, stitch lines, cap proportions"
-                  className="min-h-[60px] resize-y text-[12px]"
                   maxLength={280}
                 />
               </div>

@@ -27,6 +27,7 @@ import {
 } from '@/lib/db';
 import {
   findModelById,
+  formatUsdCompact,
   type NormalizedImageModel,
 } from '@/lib/models';
 import {
@@ -268,7 +269,7 @@ export function LibraryView({
             <span className="rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-2.5 py-0.5 font-mono text-[12px] tabular-nums text-[var(--muted-foreground)]">
               Lifetime total:{' '}
               <span className="font-medium text-[var(--foreground)]">
-                ${lifetimeSpendUsd.toFixed(4)}
+                {formatUsdCompact(lifetimeSpendUsd)}
               </span>
             </span>
           </div>
@@ -496,7 +497,7 @@ export function LibraryView({
                           <p className="mt-0.5 font-mono text-[11px] text-[var(--muted-foreground)]">
                             {setRec.images.length} views · {shot.name} ·{' '}
                             <span className="capitalize">{resolvedTier}</span> ·{' '}
-                            {resolvedTier === 'free' ? '$0.0000' : `$${setSpend.toFixed(4)}`}
+                            {resolvedTier === 'free' ? '$0.00' : formatUsdCompact(setSpend)}
                           </p>
                         </div>
 
@@ -591,11 +592,11 @@ export function LibraryView({
             const isSvg = isSvgMedia(image.mediaType, image.dataUrl);
             const actualCostLabel =
               image.cost !== null
-                ? `$${image.cost.toFixed(4)}`
+                ? formatUsdCompact(image.cost)
                 : record.actualCost !== null && record.actualCost !== undefined
-                  ? `$${record.actualCost.toFixed(4)}`
+                  ? formatUsdCompact(record.actualCost)
                   : resolvedTier === 'free'
-                    ? '$0.0000'
+                    ? '$0.00'
                     : 'cost n/a';
 
             return (

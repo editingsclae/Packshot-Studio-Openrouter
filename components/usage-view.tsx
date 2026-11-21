@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ArrowUpRight,
   BarChart3,
@@ -15,6 +15,7 @@ import {
 } from '@/lib/db';
 import {
   findModelById,
+  formatUsdCompact,
   type NormalizedImageModel,
 } from '@/lib/models';
 import { getShotPreset } from '@/lib/presets';
@@ -32,6 +33,7 @@ interface UsageViewProps {
   costStats: ModelCostStatsMap;
   sessionSpendUsd: number;
   sessionSpendLimitUsd: number | null;
+  initialMonthKey?: string;
   onGoToGenerate: () => void;
   onGoToLibrary: () => void;
   onGoToSettings: () => void;
@@ -55,14 +57,26 @@ export function UsageView({
   costStats,
   sessionSpendUsd,
   sessionSpendLimitUsd,
+  initialMonthKey,
   onGoToGenerate,
   onGoToLibrary,
   onGoToSettings,
 }: UsageViewProps) {
-  const [selectedMonth, setSelectedMonth] = useState<string>(() =>
-    formatMonthKey(new Date())
+  const [selectedMonth, setSelectedMonth] = useState<string>(
+    () => initialMonthKey ?? formatMonthKey(new Date())
+  );
+  const [currentMonthKey, setCurrentMonthKey] = useState<string>(
+    () => initialMonthKey ?? formatMonthKey(new Date())
   );
   const [scope, setScope] = useState<BreakdownScope>('month');
+
+  useEffect(() => {
+    const localMonth = formatMonthKey(new Date());
+    setCurrentMonthKey(localMonth);
+    setSelectedMonth((prev) =>
+      initialMonthKey && prev === initialMonthKey ? localMonth : prev
+    );
+  }, [initialMonthKey]);
 
   const lifetimeSpendUsd = useMemo(
     () => records.reduce((sum, rec) => sum + getRecordSpendUsd(rec), 0),
@@ -142,20 +156,20 @@ export function UsageView({
             <span className="rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-2.5 py-0.5 font-mono text-[12px] tabular-nums text-[var(--muted-foreground)]">
               Session:{' '}
               <span className="font-medium text-[var(--foreground)]">
-                ${sessionSpendUsd.toFixed(4)}
+                {formatUsdCompact(sessionSpendUsd)}
               </span>
             </span>
             <span className="rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-2.5 py-0.5 font-mono text-[12px] tabular-nums text-[var(--muted-foreground)]">
               Lifetime:{' '}
               <span className="font-medium text-[var(--foreground)]">
-                ${lifetimeSpendUsd.toFixed(4)}
+                {formatUsdCompact(lifetimeSpendUsd)}
               </span>
             </span>
             {sessionSpendLimitUsd !== null ? (
               <span className="rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-2.5 py-0.5 font-mono text-[12px] tabular-nums text-[var(--muted-foreground)]">
                 Session limit:{' '}
                 <span className="font-medium text-[var(--foreground)]">
-                  ${sessionSpendLimitUsd.toFixed(2)}
+                  {formatUsdCompact(sessionSpendLimitUsd)}
                 </span>
               </span>
             ) : null}
@@ -186,6 +200,7 @@ export function UsageView({
         records={records}
         models={models}
         selectedMonth={selectedMonth}
+        currentMonthKey={currentMonthKey}
         onSelectedMonthChange={setSelectedMonth}
       />
 
@@ -271,9 +286,9 @@ export function UsageView({
                   row.tier === 'free'
                     ? 'Free'
                     : typeof learnedAvg === 'number'
-                      ? `~$${learnedAvg.toFixed(4)} avg`
+                      ? `~${formatUsdCompact(learnedAvg)} avg`
                       : row.images > 0 && row.totalSpend > 0
-                        ? `~$${(row.totalSpend / row.images).toFixed(4)} avg`
+                        ? `~${formatUsdCompact(row.totalSpend / row.images)} avg`
                         : '—';
 
                 return (
@@ -305,8 +320,8 @@ export function UsageView({
 
                     <div className="shrink-0 text-right font-mono text-[13px] font-semibold tabular-nums text-[var(--foreground)]">
                       {row.tier === 'free'
-                        ? '$0.0000'
-                        : `$${row.totalSpend.toFixed(4)}`}
+                        ? '$0.00'
+                        : formatUsdCompact(row.totalSpend)}
                     </div>
                   </div>
                 );
@@ -406,7 +421,7 @@ export function UsageView({
                         </span>
                       ) : (
                         <span className="font-semibold text-[var(--foreground)]">
-                          ${spend.toFixed(4)}
+                          {formatUsdCompact(spend)}
                         </span>
                       )}
                     </div>

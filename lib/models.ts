@@ -271,11 +271,71 @@ export function isUsageOrUnknownPriced(model: NormalizedImageModel): boolean {
   return model.tier === 'paid' && (model.priceUnit !== 'image' || model.priceUsd === null);
 }
 
+/**
+ * Strips leading provider prefix ("Recraft: ", "OpenAI: "), redundant leading
+ * provider word ("Recraft V4.1..." -> "V4.1..."), and trailing "(free)" suffix
+ * for compact card/chip display while preserving full name for tooltips.
+ */
+export function formatShortModelName(
+  modelOrName: Pick<NormalizedImageModel, 'name' | 'providerLabel'> | string,
+  explicitProviderLabel?: string
+): string {
+  const rawName =
+    typeof modelOrName === 'string' ? modelOrName : modelOrName.name;
+  const providerLabel =
+    explicitProviderLabel ??
+    (typeof modelOrName === 'string' ? undefined : modelOrName.providerLabel);
+
+  let stripped = rawName.trim();
+
+  // Extract and remove "<Provider>: " prefix if present
+  const colonMatch = stripped.match(/^([^:]{1,40}):\s+(.+)$/);
+  const colonProvider = colonMatch?.[1]?.trim();
+  if (colonMatch) {
+    stripped = colonMatch[2].trim();
+  }
+
+  // Strip redundant leading provider name (e.g. "Recraft V4.1 Flash V2" -> "V4.1 Flash V2")
+  const candidateProviders = [providerLabel, colonProvider].filter(
+    (p): p is string => Boolean(p && p.trim().length > 0)
+  );
+  for (const prov of candidateProviders) {
+    const escaped = prov.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`^${escaped}\\s+(.+)$`, 'i');
+    const m = stripped.match(re);
+    if (m && m[1].trim().length > 0) {
+      stripped = m[1].trim();
+      break;
+    }
+  }
+
+  // Strip trailing "(free)" tag since Draft card/price badge conveys pricing
+  stripped = stripped.replace(/\s*\(free\)\s*$/i, '').trim();
+
+  return stripped || rawName;
+}
+
+export const ENHANCE_COST_PER_PROMPT_USD = 0.001;
+
+export function formatEnhancerShortName(modelId: string): string {
+  const trimmed = modelId.trim();
+  if (!trimmed) return 'gpt-4o-mini';
+  const colonIdx = trimmed.indexOf(': ');
+  if (colonIdx !== -1) {
+    return trimmed.slice(colonIdx + 2).trim();
+  }
+  const slashIdx = trimmed.indexOf('/');
+  const withoutProvider =
+    slashIdx !== -1 ? trimmed.slice(slashIdx + 1) : trimmed;
+  return withoutProvider.replace(/:[^/]+$/, '').trim() || trimmed;
+}
+
 export function formatUsdCompact(amount: number): string {
   if (!Number.isFinite(amount) || amount <= 0) return '$0.00';
-  if (amount >= 0.01) return `$${amount.toFixed(2)}`;
-  if (amount >= 0.001) return `$${amount.toFixed(3)}`;
-  return `$${amount.toFixed(4)}`;
+  if (amount >= 0.1 || Number(amount.toFixed(3)) >= 0.1) {
+    return `$${amount.toFixed(2)}`;
+  }
+  return `$${amount.toFixed(3)}`;
 }
 
 export function formatModelPrice(
@@ -294,19 +354,33 @@ export function formatModelPrice(
     }
     return 'usage-based';
   }
-  const formatted =
-    model.priceUsd >= 0.01
-      ? `$${model.priceUsd.toFixed(3).replace(/0$/, '')}`
-      : `$${model.priceUsd.toFixed(4).replace(/0+$/, '')}`;
-  return `${formatted} / image`;
+  return `${formatUsdCompact(model.priceUsd)} / image`;
+}
+
+export interface BatchEstimateOptions {
+  enhanceEnabled?: boolean;
 }
 
 export function formatBatchEstimate(
   model: NormalizedImageModel,
   variations: number,
-  costStats?: ModelCostSummary | null
+  costStats?: ModelCostSummary | null,
+  options?: BatchEstimateOptions
 ): BatchEstimateResult {
+  const enhanceEnabled = Boolean(options?.enhanceEnabled);
+  const shotCount = Math.max(1, variations);
+  const enhanceAddon = enhanceEnabled ? ENHANCE_COST_PER_PROMPT_USD * shotCount : 0;
+
   if (model.tier === 'free') {
+    if (enhanceAddon > 0) {
+      return {
+        label: `~${formatUsdCompact(enhanceAddon)}`,
+        perImageNote: `Includes ~${formatUsdCompact(ENHANCE_COST_PER_PROMPT_USD)} / prompt AI enhancement`,
+        exactTotalUsd: enhanceAddon,
+        isUsageOrUnknown: false,
+        needsFirstRunConfirm: false,
+      };
+    }
     return {
       label: 'Free',
       perImageNote: null,
@@ -318,12 +392,14 @@ export function formatBatchEstimate(
 
   if (model.priceUnit !== 'image' || model.priceUsd === null) {
     if (costStats && costStats.count > 0) {
-      const perImage = costStats.averageActualCost;
-      const total = perImage * variations;
+      const perImage =
+        costStats.averageActualCost +
+        (enhanceEnabled ? ENHANCE_COST_PER_PROMPT_USD : 0);
+      const total = costStats.averageActualCost * shotCount + enhanceAddon;
       const runWord = costStats.count === 1 ? 'run' : 'runs';
       return {
         label: `~${formatUsdCompact(total)}`,
-        perImageNote: `~${formatUsdCompact(perImage)} / image (avg of ${costStats.count} ${runWord})`,
+        perImageNote: `~${formatUsdCompact(perImage)} / image (avg of ${costStats.count} ${runWord}${enhanceEnabled ? ' + AI enhance' : ''})`,
         exactTotalUsd: total,
         isUsageOrUnknown: true,
         needsFirstRunConfirm: false,
@@ -332,17 +408,21 @@ export function formatBatchEstimate(
 
     return {
       label: 'Cost unknown until first run',
-      perImageNote: null,
+      perImageNote: enhanceEnabled
+        ? `+ ~${formatUsdCompact(ENHANCE_COST_PER_PROMPT_USD)} / prompt AI enhancement`
+        : null,
       exactTotalUsd: null,
       isUsageOrUnknown: true,
       needsFirstRunConfirm: true,
     };
   }
 
-  const total = model.priceUsd * variations;
+  const total = model.priceUsd * shotCount + enhanceAddon;
   return {
-    label: `~$${total.toFixed(3)}`,
-    perImageNote: null,
+    label: `~${formatUsdCompact(total)}`,
+    perImageNote: enhanceEnabled
+      ? `${formatUsdCompact(model.priceUsd)} / image + ~${formatUsdCompact(ENHANCE_COST_PER_PROMPT_USD)} / prompt AI enhance`
+      : null,
     exactTotalUsd: total,
     isUsageOrUnknown: false,
     needsFirstRunConfirm: false,
@@ -409,10 +489,7 @@ export function formatPerImageShortPrice(
   if (!model) return 'Unavailable';
   if (model.tier === 'free') return 'Free';
   if (model.priceUnit === 'image' && model.priceUsd !== null) {
-    if (model.priceUsd >= 0.01) {
-      return `~$${model.priceUsd.toFixed(2)}`;
-    }
-    return `~$${model.priceUsd.toFixed(3).replace(/0+$/, '')}`;
+    return `~${formatUsdCompact(model.priceUsd)}`;
   }
   if (costStats && costStats.count > 0) {
     return `~${formatUsdCompact(costStats.averageActualCost)}`;
@@ -589,15 +666,23 @@ export function resolveQualityModeModel(
     const anyFree = eligible.find((m) => m.tier === 'free');
     if (anyFree) return anyFree;
 
+    // Fallback: strictly pick the cheapest allowed model (exact per-image price first),
+    // using config.candidateModelIds only as a tie-breaker on equal price.
+    const exactPerImage = sortModelsByPriceAsc(
+      eligible.filter((m) => m.priceUnit === 'image' && m.priceUsd !== null)
+    );
+    if (exactPerImage.length > 0) {
+      const lowestPrice = exactPerImage[0].priceUsd;
+      const preferredAtLowest = exactPerImage.find(
+        (m) => m.priceUsd === lowestPrice && config.candidateModelIds.includes(m.id)
+      );
+      return preferredAtLowest ?? exactPerImage[0];
+    }
+
     for (const cid of config.candidateModelIds) {
       const match = eligible.find((m) => m.id === cid);
       if (match) return match;
     }
-
-    const exactPerImage = sortModelsByPriceAsc(
-      eligible.filter((m) => m.priceUnit === 'image' && m.priceUsd !== null)
-    );
-    if (exactPerImage[0]) return exactPerImage[0];
 
     return sortModelsByPriceAsc(eligible)[0] ?? null;
   }

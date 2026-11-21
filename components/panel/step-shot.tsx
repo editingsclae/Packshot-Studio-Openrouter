@@ -196,7 +196,7 @@ export function StepShot({
                       : 'border-[var(--border)] bg-[var(--background)] hover:border-[var(--border-hover)] opacity-75'
                   )}
                 >
-                  <div className="flex w-full items-start justify-between gap-1.5">
+                  <span className="flex w-full items-start justify-between gap-1.5">
                     <ShotFramingDiagram shotId={preset.id} active={active} />
                     <span
                       className={cn(
@@ -208,21 +208,21 @@ export function StepShot({
                     >
                       {active ? <Check className="h-3 w-3" /> : null}
                     </span>
-                  </div>
+                  </span>
 
-                  <div className="w-full space-y-0.5">
-                    <div className="flex items-center justify-between gap-1">
+                  <span className="block w-full space-y-0.5">
+                    <span className="flex items-center justify-between gap-1">
                       <span className="truncate text-[12px] font-semibold text-[var(--foreground)]">
                         {preset.name}
                       </span>
                       <span className="shrink-0 font-mono text-[10px] text-[var(--muted-foreground)]">
                         {preset.defaultAspectRatio}
                       </span>
-                    </div>
-                    <p className="line-clamp-1 text-[10px] text-[var(--muted-foreground)]">
+                    </span>
+                    <span className="block line-clamp-1 text-[10px] text-[var(--muted-foreground)]">
                       {preset.bestFor}
-                    </p>
-                  </div>
+                    </span>
+                  </span>
                 </button>
               );
             })}
@@ -261,26 +261,26 @@ export function StepShot({
                       : 'border-[var(--border)] bg-[var(--background)] hover:border-[var(--border-hover)]'
                   )}
                 >
-                  <div className="flex w-full items-start justify-between gap-1.5 text-[var(--foreground)]">
+                  <span className="flex w-full items-start justify-between gap-1.5 text-[var(--foreground)]">
                     <ShotFramingDiagram shotId={preset.id} active={active} />
                     <span className="rounded-[4px] border border-[var(--border)] bg-[var(--card)] px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-[var(--muted-foreground)]">
                       {preset.defaultAspectRatio}
                     </span>
-                  </div>
+                  </span>
 
-                  <div className="w-full space-y-0.5">
-                    <div className="flex items-center justify-between gap-1">
+                  <span className="block w-full space-y-0.5">
+                    <span className="flex items-center justify-between gap-1">
                       <span className="truncate text-[12px] font-semibold text-[var(--foreground)]">
                         {preset.name}
                       </span>
                       {active ? (
                         <Check className="h-3.5 w-3.5 shrink-0 text-[var(--foreground)]" />
                       ) : null}
-                    </div>
-                    <p className="line-clamp-1 text-[10px] text-[var(--muted-foreground)]">
+                    </span>
+                    <span className="block line-clamp-1 text-[10px] text-[var(--muted-foreground)]">
                       {preset.bestFor}
-                    </p>
-                  </div>
+                    </span>
+                  </span>
                 </button>
               );
             })}

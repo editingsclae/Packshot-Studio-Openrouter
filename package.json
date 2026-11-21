@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint .",
     "test:multiview": "node scripts/check-multiview-prompt.mjs",
+    "test:category": "node scripts/check-category-detection.mjs",
     "clean": "next clean"
   },
   "dependencies": {

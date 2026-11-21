@@ -215,6 +215,7 @@ export interface BuildMultiViewPromptOptions {
   shotStyleId: ShotPresetId;
   hiddenSideNote?: string;
   correctionNote?: string;
+  onProductTexts?: string[];
 }
 
 /**
@@ -242,6 +243,17 @@ export function buildMultiViewPrompt(
   const correctionTrimmed = trimAtWordBoundary(options.correctionNote || '', 140);
   if (correctionTrimmed) {
     userNotes.push(`Correction: ${correctionTrimmed}.`);
+  }
+
+  const validTexts = (options.onProductTexts ?? [])
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .slice(0, 2);
+  if (validTexts.length > 0) {
+    const quotedTexts = validTexts.map((t) => `"${t}"`).join(' and ');
+    userNotes.push(
+      `The text sits fully inside the label area with generous margins on all sides, is never cropped or cut off by the label edges, and keeps this exact capitalization: ${quotedTexts}.`
+    );
   }
 
   // Whole sentences ordered by importance: background, composition, lighting

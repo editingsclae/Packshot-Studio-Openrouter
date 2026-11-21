@@ -8,6 +8,7 @@ export type ProductCategoryId =
   | 'beauty-skincare'
   | 'electronics'
   | 'home-furniture'
+  | 'kitchen-dining'
   | 'food-beverage'
   | 'bags-accessories'
   | 'bottles-packaging'
@@ -99,6 +100,17 @@ export const PRODUCT_CATEGORIES: ProductCategorySpec[] = [
     flatLayProps:
       'architectural material swatch tile and linen texture corner',
     heroBackdropNote: 'warm plaster-gray architectural seamless sweep',
+  },
+  {
+    id: 'kitchen-dining',
+    label: 'Kitchen & Dining',
+    realismModule:
+      'Accurate metal finish and brushed vs polished contrast, clean handle and spout geometry, realistic glaze or enamel reflections, believable steam-free dry surfaces, sharp rim and edge highlights.',
+    lifestyleSetting:
+      'resting on a honed marble or oiled butcher-block kitchen countertop bathed in crisp morning window light',
+    flatLayProps:
+      'folded natural linen kitchen towel edge and subtle stoneware saucer resting at frame margin',
+    heroBackdropNote: 'warm mineral-stone or deep slate matte studio backdrop',
   },
   {
     id: 'food-beverage',
@@ -309,13 +321,19 @@ const CATEGORY_KEYWORDS: ReadonlyArray<{
   {
     id: 'beauty-skincare',
     patterns: [
-      /\b(serum|skincare|moisturizer|cleanser|toner|cream|lotion|perfume|fragrance|cologne|cosmetic|lipstick|mascara|dropper|ampoule|sunscreen|balm)\b/i,
+      /\b(powder\s+compacts?|compacts?|palettes?|serum|skincare|moisturizer|cleanser|toner|cream|lotion|perfume|fragrance|cologne|cosmetic|lipsticks?|mascara|dropper|ampoule|sunscreen|balm)\b/i,
+    ],
+  },
+  {
+    id: 'food-beverage',
+    patterns: [
+      /\b(beans|ground|roast|roasted|capsules?|pods?|tea\s+bags?|instant|snacks?|sauces?|powders?|syrups?)\b/i,
     ],
   },
   {
     id: 'bags-accessories',
     patterns: [
-      /\b(bag|bags|tote|backpack|handbag|crossbody|wallet|purse|duffel|luggage|suitcase|satchel|briefcase|messenger|pouch|belt)\b/i,
+      /\b(bag|bags|totes?|backpacks?|handbag|crossbody|wallets?|purse|duffel|luggage|suitcase|satchel|briefcase|messenger|pouch|belt)\b/i,
     ],
   },
   {
@@ -327,13 +345,19 @@ const CATEGORY_KEYWORDS: ReadonlyArray<{
   {
     id: 'electronics',
     patterns: [
-      /\b(headphone|headphones|earbud|earbuds|speaker|keyboard|mouse|camera|lens|laptop|tablet|phone|smartphone|charger|microphone|dac|console|gadget|router)\b/i,
+      /\b(headphones?|earbuds?|earphones?|speakers?|keyboard|mouse|cameras?|lens|laptop|tablet|phone|smartphone|charger|microphone|dac|console|gadget|router)\b/i,
+    ],
+  },
+  {
+    id: 'kitchen-dining',
+    patterns: [
+      /\b(kettles?|pots?|pans?|mugs?|cups?|plates?|knives|knife|blenders?|toasters?|bowls?|cookers?|sauce\s+pans?|saucepans?|skillets?|woks?|coffee\s+makers?|coffee\s+machines?|coffee\s+grinders?|coffee\s+pots?|espresso\s+machines?|french\s+press(?:es)?|moka\s+pots?|coffee\s+mugs?|teapots?|cookware|tableware|cutlery|carafe)\b/i,
     ],
   },
   {
     id: 'food-beverage',
     patterns: [
-      /\b(coffee|espresso|tea|matcha|chocolate|snack|granola|honey|olive\s+oil|sauce|wine|beer|whiskey|soda|juice|beverage|roast|cookie|pasta)\b/i,
+      /\b(espresso|tea|matcha|chocolate|granola|honey|olive\s+oil|wine|beer|whiskey|soda|juice|beverage|cookie|pasta)\b/i,
     ],
   },
   {
@@ -351,22 +375,174 @@ const CATEGORY_KEYWORDS: ReadonlyArray<{
   {
     id: 'home-furniture',
     patterns: [
-      /\b(kettle|chair|sofa|couch|lamp|table|desk|mug|cup|vase|candle|pillow|cushion|stool|shelf|chair|ceramic|carafe|teapot|bowl|planter)\b/i,
+      /\b(chair|sofa|couch|lamp|table|desk|vase|candle|pillow|cushion|stool|shelf|ceramic|planter|rug|curtain)\b/i,
     ],
   },
 ];
 
-/**
- * Pure client-side keyword category detection (zero API calls).
- */
-export function detectCategoryFromName(name: string): ProductCategoryId | null {
-  const cleaned = name.trim();
-  if (!cleaned) return null;
+const COMPOUND_HEAD_PATTERNS: ReadonlyArray<{
+  id: ProductCategoryId;
+  pattern: RegExp;
+}> = [
+  {
+    id: 'watches-accessories',
+    pattern: /\b(watch\s+strap|diver\s+watch|field\s+watch)\b/i,
+  },
+  {
+    id: 'beauty-skincare',
+    pattern: /\b(powder\s+compacts?)\b/i,
+  },
+  {
+    id: 'food-beverage',
+    pattern: /\b(tea\s+bags?|olive\s+oil)\b/i,
+  },
+  {
+    id: 'home-furniture',
+    pattern: /\b(plant\s+pots?|flower\s+pots?|garden\s+pots?)\b/i,
+  },
+  {
+    id: 'kitchen-dining',
+    pattern:
+      /\b(coffee\s+makers?|coffee\s+machines?|coffee\s+grinders?|coffee\s+pots?|espresso\s+machines?|french\s+press(?:es)?|moka\s+pots?|coffee\s+mugs?|sauce\s+pans?)\b/i,
+  },
+  {
+    id: 'bottles-packaging',
+    pattern: /\b(pouch\s+pack)\b/i,
+  },
+  {
+    id: 'toys',
+    pattern: /\b(action\s+figures?|board\s+games?)\b/i,
+  },
+];
+
+const IGNORED_HEAD_WORDS = new Set([
+  'ceramic',
+  'steel',
+  'stainless',
+  'glass',
+  'wood',
+  'wooden',
+  'leather',
+  'cotton',
+  'linen',
+  'plastic',
+  'silicone',
+  'metal',
+  'black',
+  'white',
+  'matte',
+  'brushed',
+]);
+
+const UNIT_OR_NUMBER_RE =
+  /^(?:\d+(?:[.,]\d+)?(?:-?(?:kg|kgs|g|gm|gms|ml|l|oz|pack|packs|set|sets|pc|pcs))?|kg|kgs|g|gm|gms|ml|l|oz|pack|packs|set|sets|pc|pcs)$/i;
+
+const TRAILING_SIZE_WORDS = new Set([
+  'xs',
+  's',
+  'm',
+  'l',
+  'xl',
+  'xxl',
+  'xxxl',
+  '2xl',
+  '3xl',
+  '4xl',
+  'small',
+  'medium',
+  'large',
+  'mini',
+  'jumbo',
+  'petite',
+  'tall',
+]);
+
+function tokenizeProductName(name: string): string[] {
+  const rawTokens = name
+    .trim()
+    .split(/[\s/_,;|()]+/)
+    .map((tok) => tok.replace(/^[^a-z0-9]+|[^a-z0-9]+$/gi, '').toLowerCase())
+    .filter(Boolean);
+
+  const filtered = rawTokens.filter((tok) => !UNIT_OR_NUMBER_RE.test(tok));
+
+  while (
+    filtered.length > 0 &&
+    TRAILING_SIZE_WORDS.has(filtered[filtered.length - 1])
+  ) {
+    filtered.pop();
+  }
+
+  return filtered;
+}
+
+function matchCompoundHead(text: string): ProductCategoryId | null {
+  if (!text) return null;
+  for (const compound of COMPOUND_HEAD_PATTERNS) {
+    if (compound.pattern.test(text)) {
+      return compound.id;
+    }
+  }
+  return null;
+}
+
+function matchCategoryText(text: string): ProductCategoryId | null {
+  if (!text) return null;
   for (const entry of CATEGORY_KEYWORDS) {
-    if (entry.patterns.some((re) => re.test(cleaned))) {
+    if (entry.patterns.some((re) => re.test(text))) {
       return entry.id;
     }
   }
+  return null;
+}
+
+/**
+ * Pure client-side head-noun-first keyword category detection (zero API calls).
+ */
+export function detectCategoryFromName(name: string): ProductCategoryId | null {
+  const tokens = tokenizeProductName(name);
+  if (tokens.length === 0) return null;
+
+  // Pass 1: ignore trailing material/color words as head-noun candidates and walk left,
+  // then check the last two non-material tokens (compounds first, then final noun, then left neighbor).
+  let headEnd = tokens.length;
+  while (headEnd > 0 && IGNORED_HEAD_WORDS.has(tokens[headEnd - 1])) {
+    headEnd--;
+  }
+
+  if (headEnd > 0) {
+    const tailTokens = tokens.slice(Math.max(0, headEnd - 2), headEnd);
+    if (tailTokens.length === 2) {
+      const compoundMatch = matchCompoundHead(tailTokens.join(' '));
+      if (compoundMatch) {
+        return compoundMatch;
+      }
+    }
+
+    const lastTokenMatch = matchCategoryText(tailTokens[tailTokens.length - 1]);
+    if (lastTokenMatch) {
+      return lastTokenMatch;
+    }
+
+    if (tailTokens.length === 2 && !IGNORED_HEAD_WORDS.has(tailTokens[0])) {
+      const prevTailMatch = matchCategoryText(tailTokens[0]);
+      if (prevTailMatch) {
+        return prevTailMatch;
+      }
+    }
+  }
+
+  // Pass 2: match the full token sequence (compounds first, then priority order).
+  const fullText = tokens.join(' ');
+  const fullCompoundMatch = matchCompoundHead(fullText);
+  if (fullCompoundMatch) {
+    return fullCompoundMatch;
+  }
+
+  if (tokens.length > 2 || headEnd === 0) {
+    return matchCategoryText(fullText);
+  }
+
   return null;
 }
 

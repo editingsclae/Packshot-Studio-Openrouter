@@ -13,6 +13,7 @@ import {
 import {
   detectQualityModeForModel,
   formatPerImageShortPrice,
+  formatShortModelName,
   QUALITY_MODE_CONFIGS,
   type AspectRatio,
   type BatchEstimateResult,
@@ -106,6 +107,7 @@ interface LeftControlPanelProps {
   onVariationsChange: (count: number) => void;
   enhanceEnabled: boolean;
   onEnhanceChange: (enabled: boolean) => void;
+  enhancerModel: string;
   resolution: string;
   onResolutionChange: (res: string) => void;
   effectiveQuality: string;
@@ -183,6 +185,7 @@ export function LeftControlPanel({
   onVariationsChange,
   enhanceEnabled,
   onEnhanceChange,
+  enhancerModel,
   resolution,
   onResolutionChange,
   effectiveQuality,
@@ -231,15 +234,15 @@ export function LeftControlPanel({
 
   // One-line summaries for collapsed steps
   const step1Summary = useMemo(() => {
-    const parts: string[] = [];
-    if (brief.name.trim()) {
-      parts.push(brief.name.trim());
-    } else if (inputMode === 'photo' && inputReferences.length > 0) {
-      parts.push(`${inputReferences.length} photo${inputReferences.length > 1 ? 's' : ''}`);
-    } else {
+    const trimmedName = brief.name.trim();
+    if (!trimmedName) {
+      if (inputMode === 'photo' && inputReferences.length > 0) {
+        return `${inputReferences.length} photo${inputReferences.length > 1 ? 's' : ''}`;
+      }
       return 'Describe product to start';
     }
-    parts.push(getCategorySpec(brief.category).label);
+
+    const parts: string[] = [trimmedName, getCategorySpec(brief.category).label];
     const colorNames = Array.from(
       new Set(
         brief.colors
@@ -251,7 +254,13 @@ export function LeftControlPanel({
     if (colorNames.length > 0) {
       parts.push(colorNames.join(', '));
     }
-    return parts.join(' · ');
+
+    const fullSummary = parts.join(' · ');
+    // Drop category (and extra metadata) when it would truncate in the step header; show product name only
+    if (fullSummary.length > 36) {
+      return trimmedName;
+    }
+    return fullSummary;
   }, [brief.name, brief.category, brief.colors, inputMode, inputReferences.length]);
 
   const step2Summary = useMemo(() => {
@@ -264,8 +273,9 @@ export function LeftControlPanel({
   const step3Summary = useMemo(() => {
     const qModeId = detectQualityModeForModel(selectedModel.id, models, inputMode);
     const qLabel = qModeId
-      ? QUALITY_MODE_CONFIGS.find((c) => c.id === qModeId)?.label ?? selectedModel.name
-      : selectedModel.name;
+      ? QUALITY_MODE_CONFIGS.find((c) => c.id === qModeId)?.label ??
+        formatShortModelName(selectedModel)
+      : formatShortModelName(selectedModel);
     const priceLabel = formatPerImageShortPrice(
       selectedModel,
       costStats[selectedModel.id]
@@ -598,6 +608,7 @@ export function LeftControlPanel({
             onVariationsChange={onVariationsChange}
             enhanceEnabled={enhanceEnabled}
             onEnhanceChange={onEnhanceChange}
+            enhancerModel={enhancerModel}
             resolution={resolution}
             onResolutionChange={onResolutionChange}
             effectiveQuality={effectiveQuality}
@@ -622,6 +633,7 @@ export function LeftControlPanel({
         pendingSlots={pendingSlots}
         elapsedMs={elapsedMs}
         modelName={selectedModel.name}
+        modelProviderLabel={selectedModel.providerLabel}
         estimateLabel={batchEstimate.label}
         perImageNote={
           selectedModel.tier === 'paid' ? batchEstimate.perImageNote : null

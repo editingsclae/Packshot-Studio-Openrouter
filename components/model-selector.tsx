@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import {
   formatModelPrice,
+  formatShortModelName,
   groupModelsByProvider,
   isRecommendedProductModel,
   pickPreferredDefaultModel,
@@ -267,9 +268,14 @@ export function ModelSelector({
               compact ? 'h-9' : 'h-10'
             )}
           >
-            <div className="flex items-center gap-2 min-w-0">
+            <div
+              title={selectedModel ? selectedModel.name : undefined}
+              className="flex items-center gap-2 min-w-0"
+            >
               <span className="truncate font-medium">
-                {selectedModel ? selectedModel.name : 'Select model'}
+                {selectedModel
+                  ? formatShortModelName(selectedModel)
+                  : 'Select model'}
               </span>
               {selectedModel ? (
                 <span className="font-mono text-[11px] text-[var(--muted-foreground)] shrink-0 tabular-nums">

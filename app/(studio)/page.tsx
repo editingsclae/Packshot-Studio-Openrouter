@@ -1,5 +1,6 @@
 import { StudioApp } from '@/components/studio-app';
 
 export default function HomePage() {
-  return <StudioApp />;
+  const initialMonthKey = new Date().toISOString().slice(0, 7);
+  return <StudioApp initialMonthKey={initialMonthKey} />;
 }

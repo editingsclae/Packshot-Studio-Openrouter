@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useState, useSyncExternalStore } from 'react';
+import React, { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import {
   Bar,
   BarChart,
@@ -12,12 +12,13 @@ import {
 } from 'recharts';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import type { GenerationRecord } from '@/lib/db';
-import { findModelById, type NormalizedImageModel } from '@/lib/models';
+import { findModelById, formatUsdCompact, type NormalizedImageModel } from '@/lib/models';
 
 interface UsageHistoryChartProps {
   records: GenerationRecord[];
   models: NormalizedImageModel[];
   selectedMonth?: string;
+  currentMonthKey?: string;
   onSelectedMonthChange?: (month: string) => void;
 }
 
@@ -87,7 +88,7 @@ function SpendTooltip({ active, payload }: ChartTooltipProps) {
         <div className="flex items-center justify-between gap-4">
           <span>Paid spend</span>
           <span className="text-[var(--foreground)] font-medium">
-            ${d.cost.toFixed(4)}
+            {formatUsdCompact(d.cost)}
           </span>
         </div>
         <div className="flex items-center justify-between gap-4">
@@ -103,6 +104,7 @@ export function UsageHistoryChart({
   records,
   models,
   selectedMonth: controlledMonth,
+  currentMonthKey: controlledCurrentMonth,
   onSelectedMonthChange,
 }: UsageHistoryChartProps) {
   const isClient = useSyncExternalStore(
@@ -111,8 +113,22 @@ export function UsageHistoryChart({
     () => false
   );
 
-  const currentMonthKey = formatMonthKey(new Date());
-  const [internalMonth, setInternalMonth] = useState<string>(currentMonthKey);
+  const [internalCurrentMonth, setInternalCurrentMonth] = useState<string>(
+    () => controlledCurrentMonth ?? controlledMonth ?? formatMonthKey(new Date())
+  );
+  const [internalMonth, setInternalMonth] = useState<string>(
+    () => controlledMonth ?? controlledCurrentMonth ?? formatMonthKey(new Date())
+  );
+
+  useEffect(() => {
+    const localMonth = formatMonthKey(new Date());
+    setInternalCurrentMonth(localMonth);
+    if (!controlledMonth) {
+      setInternalMonth(localMonth);
+    }
+  }, [controlledMonth]);
+
+  const currentMonthKey = controlledCurrentMonth ?? internalCurrentMonth;
   const selectedMonth = controlledMonth ?? internalMonth;
 
   const updateMonth = (delta: number) => {
@@ -286,7 +302,7 @@ export function UsageHistoryChart({
             Monthly paid spend
           </span>
           <span className="mt-0.5 block font-mono text-[15px] font-semibold tabular-nums text-[var(--foreground)]">
-            ${monthlySpend.toFixed(4)}
+            {formatUsdCompact(monthlySpend)}
           </span>
         </div>
 
@@ -307,7 +323,7 @@ export function UsageHistoryChart({
             Peak day
           </span>
           <span className="mt-0.5 block font-mono text-[15px] font-semibold tabular-nums text-[var(--foreground)]">
-            {peakDay ? `$${peakDay.cost.toFixed(4)}` : '$0.0000'}
+            {peakDay ? formatUsdCompact(peakDay.cost) : '$0.00'}
           </span>
         </div>
 
@@ -355,7 +371,7 @@ export function UsageHistoryChart({
                 axisLine={false}
                 width={56}
                 tickFormatter={(v: number) =>
-                  v === 0 ? '$0' : v < 0.01 ? `$${v.toFixed(3)}` : `$${v.toFixed(2)}`
+                  v === 0 ? '$0' : formatUsdCompact(v)
                 }
                 tick={{
                   fill: 'var(--muted-foreground)',

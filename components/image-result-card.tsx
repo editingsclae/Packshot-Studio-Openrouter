@@ -25,6 +25,7 @@ import {
   isSvgMedia,
   type GeneratedImageItem,
 } from '@/lib/db';
+import { formatUsdCompact } from '@/lib/models';
 import { cn } from '@/lib/utils';
 
 const DEGRADED_LABELS: Record<string, string> = {
@@ -436,7 +437,7 @@ export function ImageResultCard({
         {/* Mono Telemetry + Actions Row */}
         <div className="mt-auto flex flex-wrap items-center justify-between gap-2 pt-1">
           <div className="flex items-center gap-1.5 font-mono text-[11px] tabular-nums text-[var(--muted-foreground)]">
-            <span>{image.cost !== null ? `$${image.cost.toFixed(4)}` : 'usage n/a'}</span>
+            <span>{image.cost !== null ? formatUsdCompact(image.cost) : 'usage n/a'}</span>
             <span aria-hidden="true">·</span>
             <span>{(image.durationMs / 1000).toFixed(1)}s</span>
             {typeof image.seed === 'number' ? (

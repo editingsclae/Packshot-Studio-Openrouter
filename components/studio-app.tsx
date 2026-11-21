@@ -19,11 +19,15 @@ import {
   findModelById,
   formatBatchEstimate,
   formatModelPrice,
+  formatShortModelName,
+  formatUsdCompact,
+  getCheapestPaidModel,
   getDefaultQualityForModel,
   OFFLINE_FALLBACK_MODELS,
   pickCheapestRecommendedReferenceModel,
   pickPreferredDefaultModel,
   pickTierSwitchModel,
+  resolveQualityModeModel,
   type AspectRatio,
   type DiscoverySource,
   type ModelTier,
@@ -53,16 +57,19 @@ import {
   type MarketplaceAlignPresetId,
 } from '@/lib/packshot-crop';
 import {
+  cloneProductBrief,
   DEFAULT_PANEL_PREFS,
   DEFAULT_SETTINGS,
   inferPresetCategory,
   isSvgMedia,
+  loadBriefDraft,
   loadHistory,
   loadModelCostStats,
   loadPanelPreferences,
   loadSettings,
   loadUserPresets,
   recordModelCostSample,
+  saveBriefDraft,
   saveHistory,
   saveModelCostStats,
   savePanelPreferences,
@@ -175,9 +182,13 @@ interface ShotSetGroup {
 
 interface StudioAppProps {
   initialTab?: StudioTab;
+  initialMonthKey?: string;
 }
 
-export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
+export function StudioApp({
+  initialTab = 'generate',
+  initialMonthKey,
+}: StudioAppProps) {
   const [activeTab, setActiveTab] = useState<StudioTab>(initialTab);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const studioShell = useStudioShell();
@@ -326,6 +337,28 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
     session: MultiViewInitialSession | null;
   }>({ open: false, session: null });
 
+  const modelsRef = useRef(models);
+  modelsRef.current = models;
+  const hasDiscoveredModelsRef = useRef(false);
+  const modelIdRef = useRef(modelId);
+  modelIdRef.current = modelId;
+  const inputModeRef = useRef(inputMode);
+  inputModeRef.current = inputMode;
+  const costStatsRef = useRef(costStats);
+  costStatsRef.current = costStats;
+  const freeFallbackNotifiedRef = useRef(false);
+
+  const notifyFreeModelFallback = useCallback(
+    (fallback: NormalizedImageModel) => {
+      if (freeFallbackNotifiedRef.current) return;
+      freeFallbackNotifiedRef.current = true;
+      toast.info(
+        `Free Draft model is unavailable — switched to ${formatShortModelName(fallback)} (${formatModelPrice(fallback, costStatsRef.current[fallback.id])})`
+      );
+    },
+    []
+  );
+
   const applyDiscoveryResponse = useCallback(
     (data: {
       models?: NormalizedImageModel[];
@@ -338,13 +371,48 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
     }) => {
       if (Array.isArray(data.models) && data.models.length > 0) {
         const discovered = data.models;
+        hasDiscoveredModelsRef.current = true;
+        modelsRef.current = discovered;
         setModels(discovered);
-        setModelId((currentId) => {
-          if (findModelById(discovered, currentId)) {
-            return currentId;
+
+        const activeId = modelIdRef.current;
+        const activeStillPresent = findModelById(discovered, activeId);
+        if (!activeStillPresent) {
+          const wasFreeModel =
+            activeId === DEFAULT_FREE_MODEL_ID || activeId.endsWith(':free');
+          const anyFreeAvailable = discovered.some((m) => m.tier === 'free');
+
+          if (wasFreeModel && !anyFreeAvailable) {
+            const cheapestFallback =
+              resolveQualityModeModel('draft', discovered, inputModeRef.current) ??
+              getCheapestPaidModel(discovered, inputModeRef.current) ??
+              pickPreferredDefaultModel(discovered, {
+                inputMode: inputModeRef.current,
+              });
+            if (cheapestFallback) {
+              setModelId(cheapestFallback.id);
+              setSettings((prev) => {
+                const next = {
+                  ...prev,
+                  modelTier: cheapestFallback.tier,
+                  defaultModel: cheapestFallback.id,
+                };
+                void saveSettings(next);
+                return next;
+              });
+              if (data.source !== 'offline') {
+                notifyFreeModelFallback(cheapestFallback);
+              }
+            }
+          } else {
+            const preferred = pickPreferredDefaultModel(discovered, {
+              inputMode: inputModeRef.current,
+            });
+            if (preferred) {
+              setModelId(preferred.id);
+            }
           }
-          return pickPreferredDefaultModel(discovered)?.id ?? currentId;
-        });
+        }
       }
       setDiscoveryStatus({
         source: data.source ?? 'live',
@@ -357,7 +425,7 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
         enhancerModel: data.enhancerModel || 'openai/gpt-4o-mini',
       });
     },
-    []
+    [notifyFreeModelFallback]
   );
 
   const handleRefreshModels = useCallback(async () => {
@@ -393,7 +461,7 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
     }
   }, [applyDiscoveryResponse]);
 
-  // Hydrate settings, history, panel preferences & per-model cost stats from IndexedDB + discover models
+  // Hydrate settings, history, brief draft, panel preferences & per-model cost stats from IndexedDB + discover models
   useEffect(() => {
     let active = true;
 
@@ -421,12 +489,14 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
         loadedCostStats,
         loadedUserPresets,
         loadedPanelPrefs,
+        loadedBriefDraft,
       ] = await Promise.all([
         loadSettings(),
         loadHistory(),
         loadModelCostStats(),
         loadUserPresets(),
         loadPanelPreferences(),
+        loadBriefDraft(),
       ]);
       if (!active) return;
       const seededStats = seedModelCostStatsFromHistory(loadedCostStats, loadedHistory);
@@ -437,15 +507,84 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
       setUserPresets(loadedUserPresets);
       setSettings(loadedSettings);
       setPanelPrefs(loadedPanelPrefs);
-      setShotId(loadedPanelPrefs.shotId);
+      setShotId(loadedBriefDraft?.shotId ?? loadedPanelPrefs.shotId);
       setVariations(loadedPanelPrefs.variations);
-      setBrief((prev) =>
-        prev.name.trim()
-          ? prev
-          : { ...prev, category: loadedPanelPrefs.category }
+
+      if (loadedBriefDraft) {
+        setBrief(cloneProductBrief(loadedBriefDraft.brief));
+        setCategoryManuallyOverridden(loadedBriefDraft.categoryManuallyOverridden);
+        if (typeof loadedBriefDraft.enhanceEnabled === 'boolean') {
+          setEnhanceEnabled(loadedBriefDraft.enhanceEnabled);
+        }
+        if (Array.isArray(loadedBriefDraft.activeRefineChips)) {
+          setActiveRefineChips(loadedBriefDraft.activeRefineChips);
+        }
+        if (typeof loadedBriefDraft.ratioOverrideActive === 'boolean') {
+          setRatioOverrideActive(loadedBriefDraft.ratioOverrideActive);
+        }
+      } else {
+        setBrief((prev) =>
+          prev.name.trim()
+            ? prev
+            : { ...prev, category: loadedPanelPrefs.category }
+        );
+      }
+
+      const preferredDraftModelId = loadedBriefDraft?.modelId;
+      const targetDefaultModelId =
+        preferredDraftModelId && preferredDraftModelId.trim().length > 0
+          ? preferredDraftModelId
+          : loadedSettings.defaultModel;
+
+      if (hasDiscoveredModelsRef.current) {
+        const discovered = modelsRef.current;
+        const foundDraftModel = preferredDraftModelId
+          ? findModelById(discovered, preferredDraftModelId)
+          : undefined;
+        const foundDefault =
+          (foundDraftModel && foundDraftModel.allowed !== false ? foundDraftModel : undefined) ??
+          findModelById(discovered, loadedSettings.defaultModel);
+        if (foundDefault) {
+          setModelId(foundDefault.id);
+        } else {
+          const wasFree =
+            targetDefaultModelId === DEFAULT_FREE_MODEL_ID ||
+            targetDefaultModelId.endsWith(':free') ||
+            loadedSettings.modelTier === 'free';
+          const anyFreeAvailable = discovered.some((m) => m.tier === 'free');
+          if (wasFree && !anyFreeAvailable) {
+            const cheapestFallback =
+              resolveQualityModeModel('draft', discovered, inputModeRef.current) ??
+              getCheapestPaidModel(discovered, inputModeRef.current) ??
+              pickPreferredDefaultModel(discovered, {
+                inputMode: inputModeRef.current,
+              });
+            if (cheapestFallback) {
+              setModelId(cheapestFallback.id);
+              const nextSettings = {
+                ...loadedSettings,
+                modelTier: cheapestFallback.tier,
+                defaultModel: cheapestFallback.id,
+              };
+              setSettings(nextSettings);
+              void saveSettings(nextSettings);
+              notifyFreeModelFallback(cheapestFallback);
+            }
+          } else {
+            const preferred = pickPreferredDefaultModel(discovered, {
+              tier: loadedSettings.modelTier,
+              inputMode: inputModeRef.current,
+            });
+            if (preferred) setModelId(preferred.id);
+          }
+        }
+      } else {
+        setModelId(targetDefaultModelId);
+      }
+
+      setAspectRatio(
+        loadedBriefDraft?.aspectRatio ?? loadedSettings.defaultAspectRatio
       );
-      setModelId(loadedSettings.defaultModel);
-      setAspectRatio(loadedSettings.defaultAspectRatio);
       setHistory(loadedHistory);
       if (loadedHistory.length > 0) {
         setCurrentRecord(loadedHistory[0]);
@@ -489,7 +628,36 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
     return () => {
       active = false;
     };
-  }, [applyDiscoveryResponse]);
+  }, [applyDiscoveryResponse, notifyFreeModelFallback]);
+
+  // Persist last brief & form settings to IndexedDB whenever edited after hydration
+  useEffect(() => {
+    if (!hydrated) return;
+    const timer = setTimeout(() => {
+      void saveBriefDraft({
+        brief: cloneProductBrief(brief),
+        categoryManuallyOverridden,
+        enhanceEnabled,
+        activeRefineChips,
+        shotId,
+        modelId,
+        aspectRatio,
+        ratioOverrideActive,
+        updatedAt: Date.now(),
+      });
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [
+    hydrated,
+    brief,
+    categoryManuallyOverridden,
+    enhanceEnabled,
+    activeRefineChips,
+    shotId,
+    modelId,
+    aspectRatio,
+    ratioOverrideActive,
+  ]);
 
   // Sync HTML .dark class with settings.theme
   useEffect(() => {
@@ -820,25 +988,49 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
   const handleLoadSample = useCallback(
     (sample: SampleBriefPreset) => {
       const preset = getShotPreset(sample.shotId);
-      setBrief(sample.brief);
+      const nextBrief = cloneProductBrief(sample.brief);
+      setBrief(nextBrief);
       setCategoryManuallyOverridden(false);
       updatePanelPrefs({
-        category: sample.brief.category,
+        category: nextBrief.category,
         shotId: sample.shotId,
       });
       setShotId(sample.shotId);
       setRatioOverrideActive(false);
       applyAspectRatioWithClamp(preset.defaultAspectRatio, selectedModel);
+      void saveBriefDraft({
+        brief: nextBrief,
+        categoryManuallyOverridden: false,
+        shotId: sample.shotId,
+        modelId: selectedModel.id,
+        aspectRatio: preset.defaultAspectRatio,
+        ratioOverrideActive: false,
+        enhanceEnabled,
+        activeRefineChips: [],
+        updatedAt: Date.now(),
+      });
       setActiveRefineChips([]);
       setPromptEditedManually(false);
       toast.success(`Loaded "${sample.label}" brief`);
     },
-    [applyAspectRatioWithClamp, selectedModel, updatePanelPrefs]
+    [applyAspectRatioWithClamp, enhanceEnabled, selectedModel, updatePanelPrefs]
   );
 
   const handleClearForm = useCallback(() => {
-    setBrief(createEmptyBrief(panelPrefs.category));
+    const emptyBrief = createEmptyBrief(panelPrefs.category);
+    setBrief(emptyBrief);
     setCategoryManuallyOverridden(false);
+    void saveBriefDraft({
+      brief: cloneProductBrief(emptyBrief),
+      categoryManuallyOverridden: false,
+      shotId,
+      modelId: selectedModel.id,
+      aspectRatio,
+      ratioOverrideActive,
+      enhanceEnabled,
+      activeRefineChips: [],
+      updatedAt: Date.now(),
+    });
     setInputReferences([]);
     setActiveRefineChips([]);
     setPromptEditedManually(false);
@@ -847,7 +1039,7 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
     persistOpenSteps({ 1: true, 2: false, 3: false });
     setLastFocusedStep(1);
     toast.success('Form cleared');
-  }, [panelPrefs.category, persistOpenSteps]);
+  }, [aspectRatio, enhanceEnabled, panelPrefs.category, persistOpenSteps, ratioOverrideActive, selectedModel.id, shotId]);
 
   const handlePreviewEnhance = useCallback(async () => {
     if (isEnhancingPreview) return;
@@ -907,6 +1099,19 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
 
       const batchStart = Date.now();
       const CONCURRENCY_CAP = 4;
+
+      // Flush current brief & settings immediately so reload/generation keeps exact form state
+      void saveBriefDraft({
+        brief: cloneProductBrief(brief),
+        categoryManuallyOverridden,
+        enhanceEnabled,
+        activeRefineChips,
+        shotId,
+        modelId: targetModel.id,
+        aspectRatio,
+        ratioOverrideActive,
+        updatedAt: Date.now(),
+      });
 
       setIsGenerating(true);
       setElapsedMs(0);
@@ -1186,7 +1391,13 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
             const rec: GenerationRecord = {
               id: `gen-${Date.now()}-${presetId}-${Math.random().toString(36).slice(2, 7)}`,
               createdAt: Date.now(),
-              brief: { ...brief },
+              brief: cloneProductBrief(brief),
+              briefSnapshot: {
+                name: brief.name,
+                category: brief.category,
+                shotId: presetId,
+                modelId: targetModel.id,
+              },
               shotId: presetId,
               modelId: targetModel.id,
               modelTier: groupDone[0].modelTier,
@@ -1239,7 +1450,13 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
             const newRecord: GenerationRecord = {
               id: `gen-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
               createdAt: Date.now(),
-              brief: { ...brief },
+              brief: cloneProductBrief(brief),
+              briefSnapshot: {
+                name: brief.name,
+                category: brief.category,
+                shotId: doneResults[0].task.shotId,
+                modelId: targetModel.id,
+              },
               shotId: doneResults[0].task.shotId,
               modelId: targetModel.id,
               modelTier: doneResults[0].modelTier,
@@ -1296,6 +1513,12 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
       backgroundMode,
       outputFormat,
       brief,
+      categoryManuallyOverridden,
+      enhanceEnabled,
+      activeRefineChips,
+      shotId,
+      aspectRatio,
+      ratioOverrideActive,
     ]
   );
 
@@ -1423,26 +1646,26 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
       setSpendLimitNotice(null);
       let activeModel = selectedModel;
 
-      // If Free tier is selected and empty, auto-switch using preferred paid default order
+      // If Free tier is selected and empty, auto-switch to the cheapest allowed model
       const freeModels = models.filter((m) => m.tier === 'free');
       if (settings.modelTier === 'free' && freeModels.length === 0) {
-        const preferredPaid = pickPreferredDefaultModel(models, {
-          tier: 'paid',
-          inputMode,
-        });
-        if (!preferredPaid) {
+        const cheapestAllowed =
+          resolveQualityModeModel('draft', models, inputMode) ??
+          getCheapestPaidModel(models, inputMode) ??
+          pickPreferredDefaultModel(models, { tier: 'paid', inputMode });
+        if (!cheapestAllowed) {
           toast.error('No image models are currently available.');
           return;
         }
-        activeModel = preferredPaid;
-        setModelId(preferredPaid.id);
+        activeModel = cheapestAllowed;
+        setModelId(cheapestAllowed.id);
         setQualitySelection(null);
         updateSettings({
-          modelTier: 'paid',
-          defaultModel: preferredPaid.id,
+          modelTier: cheapestAllowed.tier,
+          defaultModel: cheapestAllowed.id,
         });
         toast.info(
-          `No free models available — switched to ${preferredPaid.name} (${formatModelPrice(preferredPaid, costStats[preferredPaid.id])})`
+          `No free models available — switched to ${formatShortModelName(cheapestAllowed)} (${formatModelPrice(cheapestAllowed, costStats[cheapestAllowed.id])})`
         );
       }
 
@@ -1459,7 +1682,10 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
 
       const activeStats = costStats[activeModel.id];
       const shotCountForBatch = isShotSetActive ? totalPlannedShots : variations;
-      const estimate = formatBatchEstimate(activeModel, shotCountForBatch, activeStats);
+      const effectiveEnhance = override?.enhance ?? enhanceEnabled;
+      const estimate = formatBatchEstimate(activeModel, shotCountForBatch, activeStats, {
+        enhanceEnabled: effectiveEnhance,
+      });
 
       // Optional session spend limit check
       if (
@@ -1479,8 +1705,8 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
         if (limitExceeded) {
           const msg =
             estimate.exactTotalUsd !== null
-              ? `Session spend limit reached: $${sessionSpendUsd.toFixed(4)} spent + ${estimate.label} estimate exceeds your $${settings.sessionSpendLimitUsd.toFixed(2)} limit.`
-              : `Session spend limit reached: $${sessionSpendUsd.toFixed(4)} spent reaches your $${settings.sessionSpendLimitUsd.toFixed(2)} limit.`;
+              ? `Session spend limit reached: ${formatUsdCompact(sessionSpendUsd)} spent + ${estimate.label} estimate exceeds your ${formatUsdCompact(settings.sessionSpendLimitUsd)} limit.`
+              : `Session spend limit reached: ${formatUsdCompact(sessionSpendUsd)} spent reaches your ${formatUsdCompact(settings.sessionSpendLimitUsd)} limit.`;
           setSpendLimitNotice(msg);
           toast.error(msg);
           return;
@@ -1547,6 +1773,7 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
       isShotSetActive,
       totalPlannedShots,
       variations,
+      enhanceEnabled,
       shotSetPresetIds,
       sessionSpendUsd,
       updateSettings,
@@ -1905,34 +2132,136 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
     [ensureReferenceCapableModel, aspectRatio, brief]
   );
 
+  const applyRecordBriefToForm = useCallback(
+    (
+      record: GenerationRecord,
+      options?: { restoreManualPrompt?: boolean; targetTab?: StudioTab }
+    ) => {
+      const snapshot = record.briefSnapshot;
+      const rawBrief = cloneProductBrief(record.brief);
+      const restoredBrief: ProductBrief = snapshot
+        ? {
+            ...rawBrief,
+            name: snapshot.name || rawBrief.name,
+            category: snapshot.category || rawBrief.category,
+          }
+        : rawBrief;
+      const targetShotId = snapshot?.shotId ?? record.shotId;
+      const requestedModelId = snapshot?.modelId ?? record.modelId;
+
+      const recModel = findModelById(models, requestedModelId);
+      const resolvedModel =
+        (recModel && recModel.allowed !== false ? recModel : undefined) ??
+        pickPreferredDefaultModel(models, {
+          tier:
+            record.modelTier ??
+            recModel?.tier ??
+            (requestedModelId.endsWith(':free') ? 'free' : 'paid'),
+          inputMode,
+        }) ??
+        selectedModel;
+      const targetTier: ModelTier =
+        resolvedModel?.tier ??
+        record.modelTier ??
+        (requestedModelId.endsWith(':free') ? 'free' : 'paid');
+      const targetModelId = resolvedModel?.id ?? requestedModelId;
+      const nextInputMode =
+        resolvedModel?.requiresReference && inputMode === 'text' ? 'photo' : inputMode;
+
+      const nextEnhance = Boolean(record.enhanced);
+      const nextRefineChips = [...(record.refineChips ?? [])];
+
+      setBrief(restoredBrief);
+      setCategoryManuallyOverridden(true);
+      setShotId(targetShotId);
+      setModelId(targetModelId);
+      setQualitySelection(null);
+      updateSettings({ modelTier: targetTier });
+      if (nextInputMode !== inputMode) {
+        setInputMode(nextInputMode);
+      }
+
+      const detectedMode = detectQualityModeForModel(
+        targetModelId,
+        models,
+        nextInputMode
+      );
+      updatePanelPrefs({
+        category: restoredBrief.category,
+        shotId: targetShotId,
+        ...(detectedMode ? { qualityMode: detectedMode } : {}),
+      });
+      setRatioOverrideActive(true);
+      if (resolvedModel) {
+        applyAspectRatioWithClamp(record.aspectRatio, resolvedModel);
+      } else {
+        setAspectRatio(record.aspectRatio);
+      }
+      setEnhanceEnabled(nextEnhance);
+      setActiveRefineChips(nextRefineChips);
+      setUnavailableModelBanner(null);
+      setSpendLimitNotice(null);
+
+      if (options?.restoreManualPrompt) {
+        setManualPromptText(record.prompt);
+        setPromptEditedManually(true);
+      } else {
+        setPromptEditedManually(false);
+      }
+
+      void saveBriefDraft({
+        brief: restoredBrief,
+        categoryManuallyOverridden: true,
+        enhanceEnabled: nextEnhance,
+        activeRefineChips: nextRefineChips,
+        shotId: targetShotId,
+        modelId: targetModelId,
+        aspectRatio: record.aspectRatio,
+        ratioOverrideActive: true,
+        updatedAt: Date.now(),
+      });
+
+      if (options?.targetTab) {
+        handleTabChange(options.targetTab);
+      }
+
+      return { resolvedModel, exactModelFound: Boolean(recModel && recModel.allowed !== false) };
+    },
+    [
+      models,
+      inputMode,
+      selectedModel,
+      updateSettings,
+      updatePanelPrefs,
+      applyAspectRatioWithClamp,
+      handleTabChange,
+    ]
+  );
+
+  const handleRestoreResultBrief = useCallback(
+    (record: GenerationRecord) => {
+      const { resolvedModel, exactModelFound } = applyRecordBriefToForm(record, {
+        restoreManualPrompt: false,
+      });
+      const label = record.briefSnapshot?.name || record.brief.name || 'Untitled product';
+      if (!exactModelFound && resolvedModel) {
+        toast.info(
+          `Loaded brief for "${label}" (switched to ${formatShortModelName(resolvedModel)})`
+        );
+      } else {
+        toast.success(`Loaded brief for "${label}"`);
+      }
+    },
+    [applyRecordBriefToForm]
+  );
+
   const handleRemixRecord = useCallback(
     (record: GenerationRecord) => {
       const recModel = findModelById(models, record.modelId);
-      const targetTier: ModelTier =
-        record.modelTier ??
-        recModel?.tier ??
-        (record.modelId.endsWith(':free') ? 'free' : 'paid');
-
-      setBrief(record.brief);
-      setCategoryManuallyOverridden(true);
-      setShotId(record.shotId);
-      setModelId(record.modelId);
-      setQualitySelection(null);
-      updateSettings({ modelTier: targetTier });
-      const detectedMode = detectQualityModeForModel(
-        record.modelId,
-        models,
-        inputMode
-      );
-      updatePanelPrefs({
-        category: record.brief.category,
-        shotId: record.shotId,
-        ...(detectedMode ? { qualityMode: detectedMode } : {}),
+      applyRecordBriefToForm(record, {
+        restoreManualPrompt: true,
+        targetTab: record.multiViewSet ? undefined : 'generate',
       });
-      setAspectRatio(record.aspectRatio);
-      setActiveRefineChips(record.refineChips ?? []);
-      setManualPromptText(record.prompt);
-      setPromptEditedManually(true);
 
       if (record.multiViewSet) {
         const refModel = ensureReferenceCapableModel(recModel);
@@ -1956,7 +2285,7 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
               dataUrl: record.multiViewSet.sourceImageDataUrl || sourceImg.dataUrl,
             },
             productName: record.brief.name || 'Product',
-            brief: record.brief,
+            brief: cloneProductBrief(record.brief),
             initialAspectRatio: record.aspectRatio,
             existingRecord: record,
           },
@@ -1965,10 +2294,9 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
         return;
       }
 
-      handleTabChange('generate');
       toast.success(`Loaded "${record.brief.name}" into Studio`);
     },
-    [models, inputMode, updateSettings, updatePanelPrefs, handleTabChange, ensureReferenceCapableModel]
+    [models, applyRecordBriefToForm, ensureReferenceCapableModel]
   );
 
   const handleUseAsReference = useCallback(
@@ -2074,8 +2402,8 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
         if (limitExceeded) {
           const msg =
             estimate.exactTotalUsd !== null
-              ? `Session spend limit reached: $${sessionSpendUsd.toFixed(4)} spent + ${estimate.label} estimate exceeds your $${settings.sessionSpendLimitUsd.toFixed(2)} limit.`
-              : `Session spend limit reached: $${sessionSpendUsd.toFixed(4)} spent reaches your $${settings.sessionSpendLimitUsd.toFixed(2)} limit.`;
+              ? `Session spend limit reached: ${formatUsdCompact(sessionSpendUsd)} spent + ${estimate.label} estimate exceeds your ${formatUsdCompact(settings.sessionSpendLimitUsd)} limit.`
+              : `Session spend limit reached: ${formatUsdCompact(sessionSpendUsd)} spent reaches your ${formatUsdCompact(settings.sessionSpendLimitUsd)} limit.`;
           setSpendLimitNotice(msg);
           toast.error(msg);
           return false;
@@ -2290,10 +2618,62 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
       formatBatchEstimate(
         selectedModel,
         totalPlannedShots,
-        costStats[selectedModel.id]
+        costStats[selectedModel.id],
+        { enhanceEnabled }
       ),
-    [selectedModel, totalPlannedShots, costStats]
+    [selectedModel, totalPlannedShots, costStats, enhanceEnabled]
   );
+
+  const resultSnapshot = useMemo(() => {
+    const rec =
+      currentShotSet && currentShotSet.length > 0
+        ? currentShotSet[0].record
+        : currentRecord;
+    if (!rec) return null;
+    return {
+      record: rec,
+      snapshot: rec.briefSnapshot ?? {
+        name: rec.brief.name,
+        category: rec.brief.category,
+        shotId: rec.shotId,
+        modelId: rec.modelId,
+      },
+    };
+  }, [currentShotSet, currentRecord]);
+
+  const resultsDifferFromForm = useMemo(() => {
+    if (!resultSnapshot) return false;
+    const { record, snapshot } = resultSnapshot;
+    const norm = (val?: string) => (val ?? '').trim();
+    if (norm(snapshot.name) !== norm(brief.name)) return true;
+    if (snapshot.category !== brief.category) return true;
+    if (snapshot.shotId !== shotId) return true;
+    if (snapshot.modelId !== selectedModel.id) return true;
+    if (norm(record.brief.materialFinish) !== norm(brief.materialFinish)) return true;
+    if (norm(record.brief.keyFeatures) !== norm(brief.keyFeatures)) return true;
+    if (norm(record.brief.detailsToLock) !== norm(brief.detailsToLock)) return true;
+    if (record.brief.useBackgroundColor !== brief.useBackgroundColor) return true;
+    if (
+      record.brief.useBackgroundColor &&
+      record.brief.backgroundColor.toUpperCase() !==
+        brief.backgroundColor.toUpperCase()
+    ) {
+      return true;
+    }
+    if (
+      JSON.stringify(record.brief.colors ?? []) !==
+      JSON.stringify(brief.colors ?? [])
+    ) {
+      return true;
+    }
+    if (
+      JSON.stringify(record.brief.onProductTexts ?? []) !==
+      JSON.stringify(brief.onProductTexts ?? [])
+    ) {
+      return true;
+    }
+    return false;
+  }, [resultSnapshot, brief, shotId, selectedModel.id]);
 
   const showSlowModelHint =
     (selectedModel.priceUsd !== null && selectedModel.priceUsd > 0.1) ||
@@ -2649,6 +3029,7 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
               }}
               enhanceEnabled={enhanceEnabled}
               onEnhanceChange={setEnhanceEnabled}
+              enhancerModel={serverStatus?.enhancerModel ?? 'openai/gpt-4o-mini'}
               resolution={resolution}
               onResolutionChange={setResolution}
               effectiveQuality={effectiveQuality}
@@ -2764,12 +3145,34 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
                     <span className="font-mono text-[12px] tabular-nums text-[var(--muted-foreground)]">
                       {currentRecord.actualCost !== null &&
                       currentRecord.actualCost !== undefined
-                        ? `$${currentRecord.actualCost.toFixed(4)}`
+                        ? formatUsdCompact(currentRecord.actualCost)
                         : currentRecord.totalCost > 0
-                          ? `~$${currentRecord.totalCost.toFixed(3)}`
+                          ? `~${formatUsdCompact(currentRecord.totalCost)}`
                           : 'Free'}{' '}
                       · {(currentRecord.totalDurationMs / 1000).toFixed(1)}s total ·{' '}
                       {currentRecordModel?.name ?? currentRecord.modelId}
+                    </span>
+                  ) : null}
+
+                  {resultSnapshot && !isGenerating ? (
+                    <span className="inline-flex items-center gap-2 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1 text-[11px]">
+                      <span className="text-[var(--muted-foreground)] truncate max-w-[220px]">
+                        Results from:{' '}
+                        <span className="font-medium text-[var(--foreground)]">
+                          {resultSnapshot.snapshot.name.trim() || 'Untitled product'}
+                        </span>
+                      </span>
+                      {resultsDifferFromForm ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleRestoreResultBrief(resultSnapshot.record)
+                          }
+                          className="shrink-0 font-medium text-[#0070f3] hover:underline cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3] rounded-[3px]"
+                        >
+                          Load this brief
+                        </button>
+                      ) : null}
                     </span>
                   ) : null}
                 </div>
@@ -2804,10 +3207,10 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
                   <span className="rounded-[6px] border border-[var(--border)] bg-[var(--card)] px-2.5 py-1 font-mono text-[12px] tabular-nums text-[var(--muted-foreground)]">
                     Spent this session:{' '}
                     <span className="font-medium text-[var(--foreground)]">
-                      ${sessionSpendUsd.toFixed(4)}
+                      {formatUsdCompact(sessionSpendUsd)}
                     </span>
                     {settings.sessionSpendLimitUsd !== null ? (
-                      <span> / ${settings.sessionSpendLimitUsd.toFixed(2)} limit</span>
+                      <span> / {formatUsdCompact(settings.sessionSpendLimitUsd)} limit</span>
                     ) : null}
                   </span>
                 </div>
@@ -3148,9 +3551,9 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
                           <span className="font-mono text-[11px] tabular-nums text-[var(--muted-foreground)]">
                             {group.record.actualCost !== null &&
                             group.record.actualCost !== undefined
-                              ? `$${group.record.actualCost.toFixed(4)}`
+                              ? formatUsdCompact(group.record.actualCost)
                               : group.record.totalCost > 0
-                                ? `~$${group.record.totalCost.toFixed(3)}`
+                                ? `~${formatUsdCompact(group.record.totalCost)}`
                                 : 'Free'}{' '}
                             · {(group.record.totalDurationMs / 1000).toFixed(1)}s
                           </span>
@@ -3346,6 +3749,7 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
             costStats={costStats}
             sessionSpendUsd={sessionSpendUsd}
             sessionSpendLimitUsd={settings.sessionSpendLimitUsd}
+            initialMonthKey={initialMonthKey}
             onGoToGenerate={() => handleTabChange('generate')}
             onGoToLibrary={() => handleTabChange('library')}
             onGoToSettings={() => handleTabChange('settings')}
@@ -3353,7 +3757,13 @@ export function StudioApp({ initialTab = 'generate' }: StudioAppProps) {
         ) : (
           <SettingsView
             settings={settings}
-            onUpdateSettings={updateSettings}
+            onUpdateSettings={(patch) => {
+              updateSettings(patch);
+              if (patch.defaultAspectRatio) {
+                setRatioOverrideActive(false);
+                applyAspectRatioWithClamp(patch.defaultAspectRatio, selectedModel);
+              }
+            }}
             models={models}
             costStats={costStats}
             sessionSpendUsd={sessionSpendUsd}

@@ -22,7 +22,7 @@ import {
   isSvgMedia,
   type GeneratedImageItem,
 } from '@/lib/db';
-import type { ModelTier } from '@/lib/models';
+import { formatUsdCompact, type ModelTier } from '@/lib/models';
 import { StudioModal } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -249,7 +249,7 @@ export function LightboxModal({
               <div>
                 <span className="block text-[var(--muted-foreground)]">Cost</span>
                 <span className="text-[var(--foreground)]">
-                  {image.cost !== null ? `$${image.cost.toFixed(4)}` : 'n/a'}
+                  {image.cost !== null ? formatUsdCompact(image.cost) : 'n/a'}
                 </span>
               </div>
               <div>

@@ -11,7 +11,10 @@ import {
 } from 'lucide-react';
 import {
   detectQualityModeForModel,
+  formatEnhancerShortName,
+  formatModelPrice,
   formatPerImageShortPrice,
+  formatShortModelName,
   QUALITY_MODE_CONFIGS,
   resolveQualityModeModel,
   type ModelTier,
@@ -33,6 +36,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 
 interface StepOutputProps {
@@ -51,6 +60,7 @@ interface StepOutputProps {
   onVariationsChange: (count: number) => void;
   enhanceEnabled: boolean;
   onEnhanceChange: (enabled: boolean) => void;
+  enhancerModel: string;
   resolution: string;
   onResolutionChange: (res: string) => void;
   effectiveQuality: string;
@@ -79,6 +89,7 @@ export function StepOutput({
   onVariationsChange,
   enhanceEnabled,
   onEnhanceChange,
+  enhancerModel,
   resolution,
   onResolutionChange,
   effectiveQuality,
@@ -117,84 +128,152 @@ export function StepOutput({
     hasParam('output_format') ||
     hasParam('seed');
 
+  const isCustomActive = activeQualityMode === null;
+  const activeFullPrice = formatModelPrice(
+    selectedModel,
+    costStats[selectedModel.id]
+  );
+
   return (
     <div className="space-y-3.5">
-      {/* Three Quality Mode Cards */}
+      {/* Quality Mode Cards (Draft / Standard / Premium + optional Custom card) */}
       <div className="space-y-2">
-        <div className="flex items-center justify-between gap-2">
-          <Label>Quality mode</Label>
-          {activeQualityMode === null ? (
-            <span className="font-mono text-[10px] text-[var(--muted-foreground)]">
-              Custom: {selectedModel.name}
-            </span>
-          ) : null}
-        </div>
+        <Label>Quality mode</Label>
 
-        <div className="grid grid-cols-3 gap-2">
-          {qualityOptions.map((opt) => {
-            const resolved = opt.resolvedModel;
-            const isActive =
-              resolved !== null &&
-              selectedModel.id === resolved.id &&
-              activeQualityMode === opt.id;
-            const disabled = !resolved;
+        <TooltipProvider delayDuration={150}>
+          <div
+            className={cn(
+              'grid auto-rows-fr gap-2',
+              isCustomActive ? 'grid-cols-2' : 'grid-cols-3'
+            )}
+          >
+            {qualityOptions.map((opt) => {
+              const resolved = opt.resolvedModel;
+              const isActive =
+                resolved !== null &&
+                selectedModel.id === resolved.id &&
+                activeQualityMode === opt.id;
+              const disabled = !resolved;
 
-            return (
-              <button
-                key={opt.id}
-                type="button"
-                disabled={disabled}
-                aria-pressed={isActive}
-                onClick={() => {
-                  if (!resolved) return;
-                  onSelectQualityMode(opt.id, resolved);
-                }}
-                title={
-                  resolved
-                    ? `${opt.label}: uses ${resolved.name}`
-                    : inputMode === 'photo'
-                      ? 'No reference-capable model available on this tier'
-                      : 'Unavailable on this server'
-                }
-                className={cn(
-                  'flex flex-col items-start justify-between gap-1.5 rounded-[8px] border p-2.5 text-left transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3]',
-                  disabled
-                    ? 'border-[var(--border)] bg-[var(--surface)] opacity-45 cursor-not-allowed'
-                    : isActive
-                      ? 'border-[var(--foreground)] bg-[var(--surface)] cursor-pointer'
-                      : 'border-[var(--border)] bg-[var(--background)] hover:border-[var(--border-hover)] cursor-pointer'
-                )}
-              >
-                <div className="flex w-full items-center justify-between gap-1">
-                  <span className="text-[12px] font-semibold text-[var(--foreground)]">
-                    {opt.label}
+              const fullPriceText = resolved
+                ? formatModelPrice(resolved, costStats[resolved.id])
+                : null;
+              const tooltipText = resolved
+                ? `${resolved.name} · ${fullPriceText}`
+                : inputMode === 'photo'
+                  ? 'No reference-capable model available on this tier'
+                  : 'Unavailable on this server';
+              const isDraftFree = opt.id === 'draft' && resolved?.tier === 'free';
+
+              return (
+                <Tooltip key={opt.id}>
+                  <TooltipTrigger asChild>
+                    <span className="flex h-full">
+                      <button
+                        type="button"
+                        disabled={disabled}
+                        aria-pressed={isActive}
+                        title={tooltipText}
+                        onClick={() => {
+                          if (!resolved) return;
+                          onSelectQualityMode(opt.id, resolved);
+                        }}
+                        className={cn(
+                          'flex h-full w-full flex-col items-start justify-between gap-2 rounded-[8px] border px-2 py-2.5 text-left transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3]',
+                          disabled
+                            ? 'border-[var(--border)] bg-[var(--surface)] opacity-45 cursor-not-allowed'
+                            : isActive
+                              ? 'border-[var(--foreground)] bg-[var(--surface)] cursor-pointer'
+                              : 'border-[var(--border)] bg-[var(--background)] hover:border-[var(--border-hover)] cursor-pointer'
+                        )}
+                      >
+                        <span className="flex w-full items-center justify-between gap-1">
+                          <span className="text-[12px] font-semibold text-[var(--foreground)]">
+                            {opt.label}
+                          </span>
+                          {isActive ? (
+                            <Check className="h-3.5 w-3.5 shrink-0 text-[var(--foreground)]" />
+                          ) : null}
+                        </span>
+
+                        <span className="block w-full space-y-0.5">
+                          <span className="block truncate text-[10px] text-[var(--muted-foreground)]">
+                            {resolved ? formatShortModelName(resolved) : 'Unavailable'}
+                          </span>
+                          {isDraftFree ? (
+                            <span className="block text-[10px] font-medium tracking-[-0.01em] leading-tight whitespace-nowrap text-emerald-500">
+                              Free · ends Nov 28
+                            </span>
+                          ) : (
+                            <span className="block font-mono text-[11px] font-medium tabular-nums text-[var(--foreground)]">
+                              {resolved
+                                ? formatPerImageShortPrice(
+                                    resolved,
+                                    costStats[resolved.id]
+                                  )
+                                : '—'}
+                            </span>
+                          )}
+                        </span>
+                      </button>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent className="text-[11px]">
+                    {tooltipText}
+                  </TooltipContent>
+                </Tooltip>
+              );
+            })}
+
+            {isCustomActive ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="flex h-full">
+                    <button
+                      type="button"
+                      aria-pressed={true}
+                      title={`${selectedModel.name} · ${activeFullPrice}`}
+                      onClick={() => setManualModelOpen((prev) => !prev)}
+                      className="flex h-full w-full flex-col items-start justify-between gap-2 rounded-[8px] border border-[var(--foreground)] bg-[var(--surface)] px-2 py-2.5 text-left transition-colors duration-150 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3]"
+                    >
+                      <span className="flex w-full items-center justify-between gap-1">
+                        <span className="text-[12px] font-semibold text-[var(--foreground)]">
+                          Custom
+                        </span>
+                        <Check className="h-3.5 w-3.5 shrink-0 text-[var(--foreground)]" />
+                      </span>
+
+                      <span className="block w-full space-y-0.5">
+                        <span className="block truncate text-[10px] text-[var(--muted-foreground)]">
+                          {formatShortModelName(selectedModel)}
+                        </span>
+                        <span className="block font-mono text-[11px] font-medium tabular-nums text-[var(--foreground)]">
+                          {formatPerImageShortPrice(
+                            selectedModel,
+                            costStats[selectedModel.id]
+                          )}
+                        </span>
+                      </span>
+                    </button>
                   </span>
-                  {isActive ? (
-                    <Check className="h-3.5 w-3.5 shrink-0 text-[var(--foreground)]" />
-                  ) : null}
-                </div>
-
-                <div className="w-full space-y-0.5">
-                  <div className="truncate text-[10px] text-[var(--muted-foreground)]">
-                    {resolved ? resolved.name : 'Unavailable'}
-                  </div>
-                  <div className="font-mono text-[11px] font-medium tabular-nums text-[var(--foreground)]">
-                    {resolved
-                      ? formatPerImageShortPrice(resolved, costStats[resolved.id])
-                      : '—'}
-                  </div>
-                </div>
-              </button>
-            );
-          })}
-        </div>
+                </TooltipTrigger>
+                <TooltipContent className="text-[11px]">
+                  {selectedModel.name} · {activeFullPrice}
+                </TooltipContent>
+              </Tooltip>
+            ) : null}
+          </div>
+        </TooltipProvider>
 
         {/* "Choose model manually" link */}
         <div className="flex items-center justify-between gap-2 pt-0.5">
-          <span className="text-[11px] text-[var(--muted-foreground)] truncate">
+          <span
+            title={`${selectedModel.name} · ${activeFullPrice}`}
+            className="text-[11px] text-[var(--muted-foreground)] truncate"
+          >
             Active:{' '}
             <span className="font-medium text-[var(--foreground)]">
-              {selectedModel.name}
+              {formatShortModelName(selectedModel)}
             </span>
           </span>
           <button
@@ -265,7 +344,7 @@ export function StepOutput({
         </div>
       </div>
 
-      {/* Enhance with AI switch + 1-line explanation */}
+      {/* Enhance with AI switch + model & cost explanation */}
       <div className="flex items-center justify-between gap-3 rounded-[8px] border border-[var(--border)] bg-[var(--surface)] px-2.5 py-2">
         <div className="min-w-0">
           <Label
@@ -276,7 +355,7 @@ export function StepOutput({
             <span>Enhance with AI</span>
           </Label>
           <p className="text-[10px] text-[var(--muted-foreground)]">
-            Refines studio lighting and material language automatically
+            Uses {formatEnhancerShortName(enhancerModel)}, ~$0.001 per prompt
           </p>
         </div>
         <Switch

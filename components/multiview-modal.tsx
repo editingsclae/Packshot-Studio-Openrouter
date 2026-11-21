@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import {
+  cloneProductBrief,
   downloadImageAs,
   downloadSelectedAsZip,
   isSvgMedia,
@@ -286,7 +287,7 @@ export function MultiViewModal({
   const batchEstimate = useMemo(() => {
     if (!activeModel || viewsToGenerate.length === 0) {
       return {
-        label: '$0.000',
+        label: '$0.00',
         perImageNote: null,
         exactTotalUsd: 0,
         isUsageOrUnknown: false,
@@ -357,19 +358,32 @@ export function MultiViewModal({
     const totalActual = numericCosts.reduce((sum, c) => sum + c, 0);
 
     const briefForRecord: ProductBrief = session.brief
-      ? { ...session.brief, name: session.productName || session.brief.name }
-      : { ...DEFAULT_BRIEF, name: session.productName || 'Product' };
+      ? cloneProductBrief({
+          ...session.brief,
+          name: session.productName || session.brief.name,
+        })
+      : cloneProductBrief({
+          ...DEFAULT_BRIEF,
+          name: session.productName || 'Product',
+        });
 
     return {
       id: savedRecordId,
       createdAt: session.existingRecord?.createdAt ?? Date.now(),
       brief: briefForRecord,
+      briefSnapshot: {
+        name: briefForRecord.name,
+        category: briefForRecord.category,
+        shotId: shotStyleId,
+        modelId: activeModel.id,
+      },
       shotId: shotStyleId,
       modelId: activeModel.id,
       modelTier: activeModel.tier,
       aspectRatio: effectiveAspectRatio,
       prompt: buildMultiViewPrompt(viewsToGenerate[0] ?? 'back', {
         shotStyleId,
+        onProductTexts: briefForRecord.onProductTexts,
       }),
       enhanced: false,
       refineChips: [],
@@ -462,6 +476,7 @@ export function MultiViewModal({
       shotStyleId,
       hiddenSideNote: hiddenSidesNotes[viewId],
       correctionNote,
+      onProductTexts: session.brief?.onProductTexts,
     });
 
     const seedToSend =

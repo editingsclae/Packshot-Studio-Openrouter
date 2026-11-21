@@ -152,6 +152,23 @@ assert.ok(
   'Constrained prompt must drop the full trailing lighting sentence cleanly without partial fragment'
 );
 
-console.log(
-  `Multi-view prompt check passed: ${checkedCount} view x shot style combinations (+ constrained overflow test).`
+// Verify exact on-product text placement and exact casing preservation
+const exactTextPrompt = buildMultiViewPrompt('front-left-34', {
+  shotStyleId: 'marketplace-packshot',
+  onProductTexts: ['solis 15% SERUM'],
+});
+assert.ok(
+  exactTextPrompt.length <= 1100,
+  `Exact text prompt exceeded 1100 chars: ${exactTextPrompt.length}`
 );
+assert.ok(
+  exactTextPrompt.includes(
+    'The text sits fully inside the label area with generous margins on all sides, is never cropped or cut off by the label edges, and keeps this exact capitalization: "solis 15% SERUM".'
+  ),
+  'Exact text prompt must include label margin and exact capitalization instruction'
+);
+
+console.log(
+  `Multi-view prompt check passed: ${checkedCount} view x shot style combinations (+ constrained overflow & exact text tests).`
+);
+

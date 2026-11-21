@@ -46,6 +46,8 @@ export function getDetailsToLockPlaceholder(category: ProductCategoryId): string
       return 'e.g. chassis finish, bezel chamfer, port alignment, dial/button accents';
     case 'home-furniture':
       return 'e.g. wood species tone, upholstery weave, handle/knob material, silhouette';
+    case 'kitchen-dining':
+      return 'e.g. metal or enamel finish, handle and spout geometry, rim highlight, lid fit';
     case 'food-beverage':
       return 'e.g. glaze color, garnish placement, vessel texture, liquid clarity';
     case 'bags-accessories':
@@ -77,7 +79,7 @@ export function createEmptyBrief(
 
 export const DEFAULT_BRIEF: ProductBrief = {
   name: 'Matte Black Stainless Steel Pour-Over Kettle',
-  category: 'home-furniture',
+  category: 'kitchen-dining',
   materialFinish:
     'matte black powder-coated stainless steel body with oiled walnut wood handle and lid knob',
   colors: ['#1C1C1E', '#7A5438'],
@@ -244,6 +246,50 @@ export function describeHexColor(hex: string): string {
  * 8. Realism cues (including Category Realism Module)
  * 9. Constraints (short declarative sentences)
  */
+function dedupeMaterialPhrases(raw: string): string {
+  const parts = raw
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean);
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const part of parts) {
+    const key = part.toLowerCase().replace(/\s+/g, ' ');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(part);
+  }
+  return unique.join(', ');
+}
+
+function tokenizeWords(input: string): Set<string> {
+  return new Set(
+    input
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter(Boolean)
+  );
+}
+
+function removeDuplicatePhrasesAgainst(source: string, reference: string): string {
+  const refLower = reference.toLowerCase().replace(/\s+/g, ' ');
+  const refPhrases = new Set(
+    reference
+      .split(',')
+      .map((p) => p.trim().toLowerCase().replace(/\s+/g, ' '))
+      .filter(Boolean)
+  );
+  const kept = source
+    .split(',')
+    .map((p) => p.trim())
+    .filter((p) => {
+      if (!p) return false;
+      const norm = p.toLowerCase().replace(/\s+/g, ' ');
+      return !refPhrases.has(norm) && !refLower.includes(norm);
+    });
+  return kept.join(', ');
+}
+
 export function buildPrompt(
   brief: ProductBrief,
   shotId: ShotPresetId,
@@ -254,19 +300,15 @@ export function buildPrompt(
 
   const productName = brief.name.trim() || 'Commercial ecommerce product';
   const features = brief.keyFeatures.trim();
-  const lockedDetails = (brief.detailsToLock ?? '').trim();
+  const rawLockedDetails = dedupeMaterialPhrases((brief.detailsToLock ?? '').trim());
+  const rawMaterialFinish = dedupeMaterialPhrases(brief.materialFinish.trim());
 
   // 1. Subject (one sentence, product first)
   const subjectSentence = features
     ? `Commercial product photograph of ${productName} featuring ${features}.`
     : `Commercial product photograph of ${productName}.`;
 
-  // 2. Exact details to lock (placed right after subject)
-  const exactDetailsSentence = lockedDetails
-    ? `Exact details: ${lockedDetails}.`
-    : '';
-
-  // 3. Materials, finish, natural color names (no hex codes in prompt text)
+  // 2 & 3. Exact details + Materials, finish, natural color names (no hex codes in prompt text)
   const colorList = Array.from(
     new Set(
       brief.colors
@@ -276,21 +318,84 @@ export function buildPrompt(
     )
   );
 
+  let exactDetailsSentence = '';
+  let chosenMaterialWording = rawMaterialFinish;
+
+  if (rawLockedDetails && rawMaterialFinish) {
+    const lockedWords = tokenizeWords(rawLockedDetails);
+    const materialWords = tokenizeWords(rawMaterialFinish);
+    let shared = 0;
+    for (const w of lockedWords) {
+      if (materialWords.has(w)) shared++;
+    }
+    const denom = Math.min(lockedWords.size, materialWords.size);
+    const overlapRatio = denom > 0 ? shared / denom : 0;
+
+    if (overlapRatio > 0.6) {
+      // Merge into a single sentence keeping only the longer wording
+      chosenMaterialWording =
+        rawLockedDetails.length >= rawMaterialFinish.length
+          ? rawLockedDetails
+          : rawMaterialFinish;
+      exactDetailsSentence = '';
+    } else {
+      // Keep both sentences while stripping any duplicated comma-separated phrases
+      const dedupedLocked = removeDuplicatePhrasesAgainst(
+        rawLockedDetails,
+        rawMaterialFinish
+      );
+      exactDetailsSentence = dedupedLocked
+        ? `Exact details: ${dedupedLocked}.`
+        : '';
+    }
+  } else if (rawLockedDetails) {
+    exactDetailsSentence = `Exact details: ${rawLockedDetails}.`;
+  }
+
+  const wordingLower = chosenMaterialWording.toLowerCase();
+  const nonRepeatedColors = colorList.filter(
+    (c) => !wordingLower.includes(c.toLowerCase())
+  );
+
   const materialParts: string[] = [];
-  if (brief.materialFinish.trim()) {
-    materialParts.push(`Crafted in ${brief.materialFinish.trim()}`);
+  if (chosenMaterialWording) {
+    materialParts.push(`Crafted in ${chosenMaterialWording}`);
   } else {
     materialParts.push(
       `Crafted in authentic commercial ${category.label.toLowerCase()} materials`
     );
   }
-  if (colorList.length > 0) {
-    materialParts.push(`with a colorway of ${colorList.join(', ')}`);
+  if (nonRepeatedColors.length > 0) {
+    materialParts.push(`with a colorway of ${nonRepeatedColors.join(', ')}`);
   }
   const materialsSentence = `${materialParts.join(' ')}.`;
 
+  const validTexts = brief.onProductTexts
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .slice(0, 2);
+
   // 4. Composition
-  const compositionSentence = `${shot.composition}.`;
+  let compositionText = shot.composition;
+  if (
+    validTexts.length > 0 &&
+    (shot.id === 'marketplace-packshot' || shot.id === 'studio-hero')
+  ) {
+    const straightOnLabelView =
+      'straight-on front view, product rotated so the label faces the camera squarely, label text fully legible';
+    if (compositionText.includes('three-quarter front elevation view')) {
+      compositionText = compositionText.replace(
+        'three-quarter front elevation view',
+        straightOnLabelView
+      );
+    } else {
+      compositionText = compositionText.replace(
+        /three-quarter low-eye-level angle|three-quarter/i,
+        `${straightOnLabelView}, low-eye-level angle`
+      );
+    }
+  }
+  const compositionSentence = `${compositionText}.`;
 
   // 5. Camera & lens language
   const cameraSentence = `Shot on ${shot.camera}.`;
@@ -323,23 +428,31 @@ export function buildPrompt(
     .map((id) => REFINE_CHIPS.find((c) => c.id === id)?.instruction)
     .filter((x): x is string => Boolean(x));
 
+  let categoryRealismModule = category.realismModule;
+  if (category.id === 'home-furniture') {
+    const hasFabricWord =
+      /\b(fabrics?|upholstery|sofas?|cushions?|curtains?|rugs?|linens?)\b|\bboucl[eé]/i.test(
+        brief.materialFinish
+      );
+    if (!hasFabricWord) {
+      categoryRealismModule = categoryRealismModule
+        .replace(/\s*or\s+boucl[eé]\s+upholstery\s+weave/gi, '')
+        .replace(/\s*,\s*boucl[eé]\s+upholstery\s+weave/gi, '')
+        .replace(/\s*upholstery\s+weave\s*,?/gi, '');
+    }
+  }
+
   const realismSentence = [
-    category.realismModule,
+    categoryRealismModule,
     'True-to-life proportions, natural material texture, believable specular reflections and contact shadows, and subtle real-world surface micro-imperfections.',
     ...refineInstructions,
   ].join(' ');
 
   // 9. Constraints (short declarative sentences)
-  const validTexts = brief.onProductTexts
-    .map((t) => t.trim())
-    .filter(Boolean)
-    .slice(0, 2);
-
+  const quotedTexts = validTexts.map((t) => `"${t}"`).join(' and ');
   const textConstraint =
     validTexts.length > 0
-      ? validTexts
-          .map((t) => `On-product text reads exactly "${t}", the only text in the scene.`)
-          .join(' ')
+      ? `On-product text reads exactly ${quotedTexts}, the only text in the scene. The text sits fully inside the label area with generous margins on all sides, is never cropped or cut off by the label edges, and keeps this exact capitalization: ${quotedTexts}.`
       : 'No text, typography, or printed words in the scene.';
 
   const constraints = [

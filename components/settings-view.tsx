@@ -4,6 +4,7 @@ import React from 'react';
 import { RefreshCw } from 'lucide-react';
 import {
   ASPECT_RATIOS,
+  formatUsdCompact,
   type AspectRatio,
   type ModelTier,
   type NormalizedImageModel,
@@ -200,7 +201,7 @@ export function SettingsView({
               </div>
 
               <span className="font-mono text-[11px] tabular-nums text-[var(--muted-foreground)]">
-                Spent this session: ${sessionSpendUsd.toFixed(4)}
+                Spent this session: {formatUsdCompact(sessionSpendUsd)}
               </span>
             </div>
           ) : null}

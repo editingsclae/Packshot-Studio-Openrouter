@@ -2,7 +2,14 @@
 
 import React from 'react';
 import { Clock, Eye } from 'lucide-react';
+import { formatShortModelName } from '@/lib/models';
 import { Button } from '@/components/ui/button';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 
 interface StickyGenerateBarProps {
   isGenerating: boolean;
@@ -13,6 +20,7 @@ interface StickyGenerateBarProps {
   pendingSlots: number;
   elapsedMs: number;
   modelName: string;
+  modelProviderLabel?: string;
   estimateLabel: string;
   perImageNote: string | null;
   blockReason: string | null;
@@ -34,6 +42,7 @@ export function StickyGenerateBar({
   pendingSlots,
   elapsedMs,
   modelName,
+  modelProviderLabel,
   estimateLabel,
   perImageNote,
   blockReason,
@@ -53,55 +62,11 @@ export function StickyGenerateBar({
       ? `Generate shot set (${totalPlannedShots} shots)`
       : `Generate ${variations} ${variations === 1 ? 'shot' : 'shots'}`;
 
+  const shortModelName = formatShortModelName(modelName, modelProviderLabel);
+
   return (
     <div className="fixed inset-x-0 bottom-0 z-30 border-t border-[var(--border)] bg-[var(--background)]/95 px-3.5 pt-2.5 pb-[calc(0.75rem+env(safe-area-inset-bottom))] backdrop-blur-sm lg:static lg:z-auto lg:shrink-0 lg:px-4 lg:py-3 space-y-2">
-      {/* Top context row: Active model chip + View prompt button */}
-      <div className="flex items-center justify-between gap-2 text-[11px]">
-        <span className="inline-flex min-w-0 items-center gap-1.5 rounded-[5px] border border-[var(--border)] bg-[var(--surface)] px-2 py-0.5 font-mono text-[10px] text-[var(--muted-foreground)]">
-          <span className="truncate max-w-[190px] text-[var(--foreground)]">
-            {modelName}
-          </span>
-        </span>
-
-        {showPromptInspector ? (
-          <button
-            type="button"
-            onClick={onOpenPromptDrawer}
-            className="inline-flex shrink-0 items-center gap-1 rounded-[5px] border border-[var(--border)] bg-[var(--surface)] px-2 py-0.5 text-[11px] font-medium text-[var(--foreground)] hover:border-[var(--border-hover)] cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0070f3]"
-          >
-            <Eye className="h-3 w-3 text-[var(--muted-foreground)]" />
-            <span>View prompt</span>
-            {promptEditedManually ? (
-              <span
-                title="Manual prompt edits active"
-                className="h-1.5 w-1.5 rounded-full bg-[#0070f3]"
-              />
-            ) : null}
-          </button>
-        ) : null}
-      </div>
-
-      {/* Primary CTA + Estimated Cost */}
-      <div className="flex items-center gap-2">
-        <Button
-          type="button"
-          size="lg"
-          disabled={buttonDisabled}
-          onClick={onGenerate}
-          className="flex-1 min-w-0 justify-between"
-        >
-          <span className="truncate">{primaryLabel}</span>
-          <kbd className="hidden sm:inline font-mono text-[11px] opacity-75">
-            ⌘↵
-          </kbd>
-        </Button>
-
-        <span className="inline-flex h-10 shrink-0 items-center rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-2.5 font-mono text-[11px] tabular-nums text-[var(--muted-foreground)] whitespace-nowrap">
-          {estimateLabel}
-        </span>
-      </div>
-
-      {/* 1-line block reason, spend limit notice, per-image note, or slow hint */}
+      {/* Single-line block reason above the Generate button */}
       {blockReason ? (
         <div className="flex items-center justify-between gap-2 text-[11px] text-amber-500">
           <span className="truncate">{blockReason}</span>
@@ -115,16 +80,78 @@ export function StickyGenerateBar({
             </button>
           ) : null}
         </div>
-      ) : perImageNote ? (
-        <p className="font-mono text-[10px] tabular-nums text-[var(--muted-foreground)] truncate">
-          {perImageNote}
-        </p>
-      ) : showSlowModelHint ? (
-        <p className="flex items-center gap-1.5 text-[11px] text-[var(--muted-foreground)]">
+      ) : null}
+
+      {/* Row 1: Full-width Generate button (no truncation) + shortcut hint */}
+      <Button
+        type="button"
+        size="lg"
+        disabled={buttonDisabled}
+        onClick={onGenerate}
+        className="w-full justify-between gap-2 px-4"
+      >
+        <span className="whitespace-nowrap">{primaryLabel}</span>
+        <kbd className="font-mono text-[11px] opacity-75 shrink-0">
+          ⌘↵
+        </kbd>
+      </Button>
+
+      {/* Row 2: Shortened model chip + mono cost + ghost View prompt button */}
+      <div className="flex items-center justify-between gap-2 text-[11px]">
+        <div className="flex min-w-0 items-center gap-2">
+          <TooltipProvider delayDuration={150}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span
+                  title={modelName}
+                  className="inline-flex min-w-0 items-center rounded-[5px] border border-[var(--border)] bg-[var(--surface)] px-2 py-0.5 font-mono text-[10px] text-[var(--foreground)]"
+                >
+                  <span className="truncate max-w-[140px]">
+                    {shortModelName}
+                  </span>
+                </span>
+              </TooltipTrigger>
+              <TooltipContent className="text-[11px]">
+                {modelName}
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+
+          <span
+            title={perImageNote ?? undefined}
+            className="font-mono text-[11px] tabular-nums text-[var(--muted-foreground)] shrink-0 whitespace-nowrap"
+          >
+            {estimateLabel}
+          </span>
+        </div>
+
+        {showPromptInspector ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={onOpenPromptDrawer}
+            className="h-7 shrink-0 gap-1 px-2 text-[11px] font-medium text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+          >
+            <Eye className="h-3 w-3" />
+            <span>View prompt</span>
+            {promptEditedManually ? (
+              <span
+                title="Manual prompt edits active"
+                className="h-1.5 w-1.5 rounded-full bg-[#0070f3]"
+              />
+            ) : null}
+          </Button>
+        ) : null}
+      </div>
+
+      {!blockReason && showSlowModelHint ? (
+        <p className="flex items-center gap-1.5 text-[10px] text-[var(--muted-foreground)]">
           <Clock className="h-3 w-3 shrink-0" />
-          <span>This model can take over a minute</span>
+          <span className="truncate">This model can take over a minute</span>
         </p>
       ) : null}
     </div>
   );
 }
+
