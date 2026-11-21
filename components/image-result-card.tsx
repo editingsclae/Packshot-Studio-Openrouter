@@ -249,6 +249,13 @@ export function ImageResultCard({
           ) : null;
         })()}
 
+        {image.alignmentNote ? (
+          <div className="flex items-center gap-1.5 rounded-[6px] border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-500">
+            <Info className="h-3.5 w-3.5 shrink-0" />
+            <span>{image.alignmentNote}</span>
+          </div>
+        ) : null}
+
         {/* Packshot Checker Badges (white-background shots) or SVG skip note */}
         {isWhiteBackgroundShot && isSvg ? (
           <div className="flex items-center gap-1.5 border-b border-[var(--border)] pb-2.5 text-[11px] text-[var(--muted-foreground)]">

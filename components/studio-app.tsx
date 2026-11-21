@@ -1968,17 +1968,30 @@ export function StudioApp({
         mediaType: string;
         packshotCheck: PackshotCheckResult;
         alignedLabel: string;
+        alignmentNote?: string;
       }
     ) => {
-      patchImageInStores(recordId, imageId, (img) => ({
-        ...img,
-        originalDataUrl: img.originalDataUrl ?? img.dataUrl,
-        dataUrl: patch.dataUrl,
-        mediaType: patch.mediaType,
-        packshotCheck: patch.packshotCheck,
-        alignedLabel: patch.alignedLabel,
-      }));
-      toast.success(`Aligned (${patch.alignedLabel})`);
+      patchImageInStores(recordId, imageId, (img) => {
+        const next: GeneratedImageItem = {
+          ...img,
+          originalDataUrl: img.originalDataUrl ?? img.dataUrl,
+          dataUrl: patch.dataUrl,
+          mediaType: patch.mediaType,
+          packshotCheck: patch.packshotCheck,
+          alignedLabel: patch.alignedLabel,
+        };
+        if (patch.alignmentNote) {
+          next.alignmentNote = patch.alignmentNote;
+        } else {
+          delete next.alignmentNote;
+        }
+        return next;
+      });
+      if (patch.alignmentNote) {
+        toast.info(patch.alignmentNote);
+      } else {
+        toast.success(`Aligned (${patch.alignedLabel})`);
+      }
     },
     [patchImageInStores]
   );
@@ -1997,6 +2010,7 @@ export function StudioApp({
         const next = { ...img, dataUrl: restoredUrl, packshotCheck: restoredCheck };
         delete next.originalDataUrl;
         delete next.alignedLabel;
+        delete next.alignmentNote;
         return next;
       });
       toast.success('Reverted to original uncropped image');
@@ -2019,6 +2033,7 @@ export function StudioApp({
       });
 
       let successCount = 0;
+      let skippedNote: string | undefined;
       try {
         for (const img of rasterTargets) {
           const sourceUrl = img.originalDataUrl ?? img.dataUrl;
@@ -2028,17 +2043,30 @@ export function StudioApp({
             backdropMode: preset.backdropMode,
             flattenLightBackground: true,
           });
-          patchImageInStores(record.id, img.id, (current) => ({
-            ...current,
-            originalDataUrl: current.originalDataUrl ?? current.dataUrl,
-            dataUrl: result.dataUrl,
-            mediaType: result.mediaType,
-            packshotCheck: result.packshotCheck,
-            alignedLabel: preset.shortLabel,
-          }));
+          if (result.whiteningSkippedNote) {
+            skippedNote = result.whiteningSkippedNote;
+          }
+          patchImageInStores(record.id, img.id, (current) => {
+            const next: GeneratedImageItem = {
+              ...current,
+              originalDataUrl: current.originalDataUrl ?? current.dataUrl,
+              dataUrl: result.dataUrl,
+              mediaType: result.mediaType,
+              packshotCheck: result.packshotCheck,
+              alignedLabel: preset.shortLabel,
+            };
+            if (result.whiteningSkippedNote) {
+              next.alignmentNote = result.whiteningSkippedNote;
+            } else {
+              delete next.alignmentNote;
+            }
+            return next;
+          });
           successCount++;
         }
-        if (successCount > 0) {
+        if (skippedNote) {
+          toast.info(skippedNote);
+        } else if (successCount > 0) {
           toast.success(
             `Centered ${successCount} ${successCount === 1 ? 'shot' : 'shots'} (${preset.shortLabel})`
           );

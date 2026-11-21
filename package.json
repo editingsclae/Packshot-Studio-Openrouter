@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "test:multiview": "node scripts/check-multiview-prompt.mjs",
     "test:category": "node scripts/check-category-detection.mjs",
+    "test:whitening": "node scripts/check-packshot-whitening.mjs",
     "clean": "next clean"
   },
   "dependencies": {

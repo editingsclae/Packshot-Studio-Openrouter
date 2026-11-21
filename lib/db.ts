@@ -52,6 +52,7 @@ export interface GeneratedImageItem {
   dataUrl: string;
   originalDataUrl?: string;
   alignedLabel?: string;
+  alignmentNote?: string;
   mediaType: string;
   seed?: number;
   cost: number | null;

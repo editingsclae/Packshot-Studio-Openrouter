@@ -84,6 +84,157 @@ export function deltaELab(
 const PACKSHOT_DELTA_E_THRESHOLD = 12;
 
 /**
+ * Pure buffer-based packshot analyzer (canvas-free for Node tests & browser reuse).
+ * 1) Samples corners + edge border strips to compute median background RGB and pure-white percentage.
+ * 2) Computes product bounding box by CIE76 Delta-E distance (~12) from sampled background.
+ * 3) Verifies frame occupancy (80-90%) from the real bounding box max dimension.
+ */
+export function analyzePackshotBuffer(
+  data: Uint8ClampedArray,
+  w: number,
+  h: number
+): PackshotCheckResult {
+  const borderMargin = Math.max(4, Math.round(Math.min(w, h) * 0.03));
+  const cornerSize = Math.max(8, Math.round(Math.min(w, h) * 0.06));
+  const borderR: number[] = [];
+  const borderG: number[] = [];
+  const borderB: number[] = [];
+  let borderSamples = 0;
+  let pureWhiteBorderSamples = 0;
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const isEdgeStrip =
+        x < borderMargin ||
+        x >= w - borderMargin ||
+        y < borderMargin ||
+        y >= h - borderMargin;
+      const isCorner =
+        (x < cornerSize || x >= w - cornerSize) &&
+        (y < cornerSize || y >= h - cornerSize);
+
+      if (!isEdgeStrip && !isCorner) continue;
+
+      const idx = (y * w + x) * 4;
+      const r = data[idx];
+      const g = data[idx + 1];
+      const b = data[idx + 2];
+
+      borderSamples++;
+      borderR.push(r);
+      borderG.push(g);
+      borderB.push(b);
+
+      if (r >= 246 && g >= 246 && b >= 246) {
+        pureWhiteBorderSamples++;
+      }
+    }
+  }
+
+  const bgR = median(borderR);
+  const bgG = median(borderG);
+  const bgB = median(borderB);
+  const bgHex = `#${toHexByte(bgR)}${toHexByte(bgG)}${toHexByte(bgB)}`;
+  const backgroundLuminance = Math.round(0.299 * bgR + 0.587 * bgG + 0.114 * bgB);
+
+  const borderWhitePercent =
+    borderSamples > 0 ? Math.round((pureWhiteBorderSamples / borderSamples) * 100) : 0;
+  const borderPureWhitePass =
+    borderWhitePercent >= 95 && bgR >= 246 && bgG >= 246 && bgB >= 246;
+
+  let backgroundStatus: PackshotBackgroundStatus;
+  let backgroundLabel: string;
+  if (borderPureWhitePass) {
+    backgroundStatus = 'pure-white';
+    backgroundLabel = 'Background: pure white';
+  } else if (backgroundLuminance >= 225) {
+    backgroundStatus = 'off-white';
+    backgroundLabel = `Background: off-white (${bgHex})`;
+  } else {
+    backgroundStatus = 'gray';
+    backgroundLabel = 'Background: gray';
+  }
+
+  // Compute foreground bounding box by Delta-E color distance (~12) from sampled background
+  const bgLab = rgbToLab(bgR, bgG, bgB);
+  const rowCounts = new Int32Array(h);
+  const colCounts = new Int32Array(w);
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const idx = (y * w + x) * 4;
+      const pxLab = rgbToLab(data[idx], data[idx + 1], data[idx + 2]);
+      if (deltaELab(pxLab, bgLab) > PACKSHOT_DELTA_E_THRESHOLD) {
+        rowCounts[y]++;
+        colCounts[x]++;
+      }
+    }
+  }
+
+  const minRowHits = Math.max(2, Math.floor(w * 0.005));
+  const minColHits = Math.max(2, Math.floor(h * 0.005));
+
+  let minX = w;
+  let maxX = -1;
+  let minY = h;
+  let maxY = -1;
+
+  for (let x = 0; x < w; x++) {
+    if (colCounts[x] >= minColHits) {
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+    }
+  }
+  for (let y = 0; y < h; y++) {
+    if (rowCounts[y] >= minRowHits) {
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+
+  // Fallback to single-pixel hits for delicate thin subjects
+  if (maxX < minX || maxY < minY) {
+    minX = w;
+    maxX = -1;
+    minY = h;
+    maxY = -1;
+    for (let x = 0; x < w; x++) {
+      if (colCounts[x] >= 1) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+      }
+    }
+    for (let y = 0; y < h; y++) {
+      if (rowCounts[y] >= 1) {
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+
+  let frameFillPercent = 0;
+  if (maxX >= minX && maxY >= minY) {
+    const bboxW = (maxX - minX + 1) / w;
+    const bboxH = (maxY - minY + 1) / h;
+    frameFillPercent = Math.round(Math.max(bboxW, bboxH) * 100);
+  }
+
+  const frameFillPass = frameFillPercent >= 80 && frameFillPercent <= 90;
+
+  return {
+    borderPureWhitePass,
+    borderWhitePercent,
+    frameFillPass,
+    frameFillPercent,
+    overallPass: borderPureWhitePass && frameFillPass,
+    backgroundStatus,
+    backgroundHex: bgHex,
+    backgroundLuminance,
+    backgroundLabel,
+  };
+}
+
+/**
  * Client-side canvas analyzer for white-background packshots.
  * 1) Samples corners + edge border strips to compute median background RGB and pure-white percentage.
  * 2) Computes product bounding box by CIE76 Delta-E distance (~12) from sampled background.
@@ -115,145 +266,7 @@ export async function analyzePackshotImage(dataUrl: string): Promise<PackshotChe
         ctx.drawImage(img, 0, 0, w, h);
 
         const { data } = ctx.getImageData(0, 0, w, h);
-
-        const borderMargin = Math.max(4, Math.round(Math.min(w, h) * 0.03));
-        const cornerSize = Math.max(8, Math.round(Math.min(w, h) * 0.06));
-        const borderR: number[] = [];
-        const borderG: number[] = [];
-        const borderB: number[] = [];
-        let borderSamples = 0;
-        let pureWhiteBorderSamples = 0;
-
-        for (let y = 0; y < h; y++) {
-          for (let x = 0; x < w; x++) {
-            const isEdgeStrip =
-              x < borderMargin ||
-              x >= w - borderMargin ||
-              y < borderMargin ||
-              y >= h - borderMargin;
-            const isCorner =
-              (x < cornerSize || x >= w - cornerSize) &&
-              (y < cornerSize || y >= h - cornerSize);
-
-            if (!isEdgeStrip && !isCorner) continue;
-
-            const idx = (y * w + x) * 4;
-            const r = data[idx];
-            const g = data[idx + 1];
-            const b = data[idx + 2];
-
-            borderSamples++;
-            borderR.push(r);
-            borderG.push(g);
-            borderB.push(b);
-
-            if (r >= 246 && g >= 246 && b >= 246) {
-              pureWhiteBorderSamples++;
-            }
-          }
-        }
-
-        const bgR = median(borderR);
-        const bgG = median(borderG);
-        const bgB = median(borderB);
-        const bgHex = `#${toHexByte(bgR)}${toHexByte(bgG)}${toHexByte(bgB)}`;
-        const backgroundLuminance = Math.round(0.299 * bgR + 0.587 * bgG + 0.114 * bgB);
-
-        const borderWhitePercent =
-          borderSamples > 0 ? Math.round((pureWhiteBorderSamples / borderSamples) * 100) : 0;
-        const borderPureWhitePass =
-          borderWhitePercent >= 95 && bgR >= 246 && bgG >= 246 && bgB >= 246;
-
-        let backgroundStatus: PackshotBackgroundStatus;
-        let backgroundLabel: string;
-        if (borderPureWhitePass) {
-          backgroundStatus = 'pure-white';
-          backgroundLabel = 'Background: pure white';
-        } else if (backgroundLuminance >= 225) {
-          backgroundStatus = 'off-white';
-          backgroundLabel = `Background: off-white (${bgHex})`;
-        } else {
-          backgroundStatus = 'gray';
-          backgroundLabel = 'Background: gray';
-        }
-
-        // Compute foreground bounding box by Delta-E color distance (~12) from sampled background
-        const bgLab = rgbToLab(bgR, bgG, bgB);
-        const rowCounts = new Int32Array(h);
-        const colCounts = new Int32Array(w);
-
-        for (let y = 0; y < h; y++) {
-          for (let x = 0; x < w; x++) {
-            const idx = (y * w + x) * 4;
-            const pxLab = rgbToLab(data[idx], data[idx + 1], data[idx + 2]);
-            if (deltaELab(pxLab, bgLab) > PACKSHOT_DELTA_E_THRESHOLD) {
-              rowCounts[y]++;
-              colCounts[x]++;
-            }
-          }
-        }
-
-        const minRowHits = Math.max(2, Math.floor(w * 0.005));
-        const minColHits = Math.max(2, Math.floor(h * 0.005));
-
-        let minX = w;
-        let maxX = -1;
-        let minY = h;
-        let maxY = -1;
-
-        for (let x = 0; x < w; x++) {
-          if (colCounts[x] >= minColHits) {
-            if (x < minX) minX = x;
-            if (x > maxX) maxX = x;
-          }
-        }
-        for (let y = 0; y < h; y++) {
-          if (rowCounts[y] >= minRowHits) {
-            if (y < minY) minY = y;
-            if (y > maxY) maxY = y;
-          }
-        }
-
-        // Fallback to single-pixel hits for delicate thin subjects
-        if (maxX < minX || maxY < minY) {
-          minX = w;
-          maxX = -1;
-          minY = h;
-          maxY = -1;
-          for (let x = 0; x < w; x++) {
-            if (colCounts[x] >= 1) {
-              if (x < minX) minX = x;
-              if (x > maxX) maxX = x;
-            }
-          }
-          for (let y = 0; y < h; y++) {
-            if (rowCounts[y] >= 1) {
-              if (y < minY) minY = y;
-              if (y > maxY) maxY = y;
-            }
-          }
-        }
-
-        let frameFillPercent = 0;
-        if (maxX >= minX && maxY >= minY) {
-          const bboxW = (maxX - minX + 1) / w;
-          const bboxH = (maxY - minY + 1) / h;
-          frameFillPercent = Math.round(Math.max(bboxW, bboxH) * 100);
-        }
-
-        const frameFillPass = frameFillPercent >= 80 && frameFillPercent <= 90;
-
-        resolve({
-          borderPureWhitePass,
-          borderWhitePercent,
-          frameFillPass,
-          frameFillPercent,
-          overallPass: borderPureWhitePass && frameFillPass,
-          backgroundStatus,
-          backgroundHex: bgHex,
-          backgroundLuminance,
-          backgroundLabel,
-        });
+        resolve(analyzePackshotBuffer(data, w, h));
       } catch (err) {
         reject(err);
       }

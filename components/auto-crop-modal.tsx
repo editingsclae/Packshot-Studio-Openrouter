@@ -39,6 +39,7 @@ interface AutoCropModalProps {
     mediaType: string;
     packshotCheck: PackshotCheckResult;
     alignedLabel: string;
+    alignmentNote?: string;
   }) => void;
   onRevertOriginal: () => void;
 }
@@ -249,6 +250,10 @@ export function AutoCropModal({
 
           {activeError ? (
             <p className="text-[11px] text-red-500">{activeError}</p>
+          ) : !compareOriginal && activeResult?.whiteningSkippedNote ? (
+            <p className="text-[11px] text-amber-500">
+              {activeResult.whiteningSkippedNote}
+            </p>
           ) : (
             <p className="text-[11px] text-[var(--muted-foreground)]">
               {compareOriginal
@@ -471,6 +476,7 @@ export function AutoCropModal({
                     mediaType: activeResult.mediaType,
                     packshotCheck: activeResult.packshotCheck,
                     alignedLabel: appliedLabel,
+                    alignmentNote: activeResult.whiteningSkippedNote,
                   });
                   onOpenChange(false);
                 }}

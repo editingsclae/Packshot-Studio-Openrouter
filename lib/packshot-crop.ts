@@ -72,6 +72,9 @@ export function getMarketplaceAlignPreset(
   );
 }
 
+export const LIGHT_PRODUCT_SKIP_NOTE =
+  'Background cleanup skipped to protect a light product';
+
 export interface AutoCropOptions {
   targetFill: number; // 0.65 - 0.94
   canvasMode: AlignCanvasMode;
@@ -93,6 +96,73 @@ export interface AutoCropResult {
     height: number;
   };
   appliedFillPercent: number;
+  whiteningSkippedNote?: string;
+}
+
+export interface SampledBorderStats {
+  hasAlphaBackdrop: boolean;
+  bgR: number;
+  bgG: number;
+  bgB: number;
+  bgLuminance: number;
+  bgSpread: number;
+  bgLab: [number, number, number];
+  minBorderLum: number;
+  maxBorderLum: number;
+  p90DeltaE: number;
+  deltaEThreshold: number;
+  isLowSatLightBg: boolean;
+}
+
+export interface SubjectBoundsResult {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  detectedSubjectFound: boolean;
+}
+
+export interface WhiteningSafetyResult {
+  aborted: boolean;
+  maskPixelCount: number;
+  changedPixelCount: number;
+  changedRatio: number;
+  note?: string;
+}
+
+export interface CropWhiteningInput {
+  data: Uint8ClampedArray;
+  width: number;
+  height: number;
+  fullFrameHeight: number;
+  bgR: number;
+  bgG: number;
+  bgB: number;
+  minBorderLum: number;
+  maxBorderLum: number;
+  p90DeltaE: number;
+  deltaEThreshold: number;
+  flattenLightBgToWhite: boolean;
+  featherPx?: number;
+  beforeSafetyCheck?: (data: Uint8ClampedArray, productMask: Uint8Array) => void;
+}
+
+export interface CropWhiteningOutput {
+  whiteningApplied: boolean;
+  whiteningSkippedForLightProduct: boolean;
+  whiteningSkippedNote?: string;
+  productMask: Uint8Array;
+  borderBgMask: Uint8Array;
+  interiorVoidMask: Uint8Array;
+  contactShadowMask: Uint8Array;
+  productBbox: {
+    minX: number;
+    maxX: number;
+    minY: number;
+    maxY: number;
+    found: boolean;
+  };
+  safety: WhiteningSafetyResult;
 }
 
 function median(values: number[]): number {
@@ -116,11 +186,699 @@ function loadImageElement(src: string): Promise<HTMLImageElement> {
   });
 }
 
+export function sampleBorderBackdrop(
+  data: Uint8ClampedArray,
+  w: number,
+  h: number
+): SampledBorderStats {
+  const borderMargin = Math.max(4, Math.round(Math.min(w, h) * 0.03));
+  const cornerSize = Math.max(8, Math.round(Math.min(w, h) * 0.06));
+  const borderR: number[] = [];
+  const borderG: number[] = [];
+  const borderB: number[] = [];
+  const borderLums: number[] = [];
+  let borderTotal = 0;
+  let borderTransparent = 0;
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const isEdgeStrip =
+        x < borderMargin ||
+        x >= w - borderMargin ||
+        y < borderMargin ||
+        y >= h - borderMargin;
+      const isCorner =
+        (x < cornerSize || x >= w - cornerSize) &&
+        (y < cornerSize || y >= h - cornerSize);
+      if (!isEdgeStrip && !isCorner) continue;
+
+      const idx = (y * w + x) * 4;
+      const a = data[idx + 3];
+      borderTotal++;
+      if (a < 235) {
+        borderTransparent++;
+      } else {
+        const r = data[idx];
+        const g = data[idx + 1];
+        const b = data[idx + 2];
+        borderR.push(r);
+        borderG.push(g);
+        borderB.push(b);
+        borderLums.push(0.299 * r + 0.587 * g + 0.114 * b);
+      }
+    }
+  }
+
+  const hasAlphaBackdrop =
+    borderTotal > 0 && borderTransparent / borderTotal > 0.2;
+
+  const bgR = borderR.length > 0 ? median(borderR) : 255;
+  const bgG = borderG.length > 0 ? median(borderG) : 255;
+  const bgB = borderB.length > 0 ? median(borderB) : 255;
+  const bgLuminance = 0.299 * bgR + 0.587 * bgG + 0.114 * bgB;
+  const bgSpread = Math.max(bgR, bgG, bgB) - Math.min(bgR, bgG, bgB);
+  const bgLab = rgbToLab(bgR, bgG, bgB);
+
+  borderLums.sort((a, b) => a - b);
+  const minBorderLum =
+    borderLums.length > 0
+      ? borderLums[Math.floor(borderLums.length * 0.05)]
+      : bgLuminance;
+  const maxBorderLum =
+    borderLums.length > 0
+      ? borderLums[Math.min(borderLums.length - 1, Math.floor(borderLums.length * 0.95))]
+      : bgLuminance;
+
+  const isLowSatLightBg =
+    !hasAlphaBackdrop && bgLuminance >= 200 && bgSpread <= 28;
+
+  const borderDeltaEs: number[] = [];
+  for (let i = 0; i < borderR.length; i++) {
+    borderDeltaEs.push(
+      deltaELab(rgbToLab(borderR[i], borderG[i], borderB[i]), bgLab)
+    );
+  }
+  borderDeltaEs.sort((a, b) => a - b);
+  const p90DeltaE =
+    borderDeltaEs.length > 0
+      ? borderDeltaEs[Math.floor(borderDeltaEs.length * 0.9)]
+      : 0;
+  const deltaEThreshold = clamp(Math.max(12, p90DeltaE + 3), 12, 18);
+
+  return {
+    hasAlphaBackdrop,
+    bgR,
+    bgG,
+    bgB,
+    bgLuminance,
+    bgSpread,
+    bgLab,
+    minBorderLum,
+    maxBorderLum,
+    p90DeltaE,
+    deltaEThreshold,
+    isLowSatLightBg,
+  };
+}
+
+export function findSubjectBoundsFromBuffer(
+  data: Uint8ClampedArray,
+  w: number,
+  h: number,
+  stats: SampledBorderStats
+): SubjectBoundsResult {
+  const rowCounts = new Int32Array(h);
+  const colCounts = new Int32Array(w);
+  const lumCeiling = Math.min(
+    255,
+    Math.max(stats.bgLuminance + 3, stats.maxBorderLum + 3)
+  );
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const idx = (y * w + x) * 4;
+      const a = data[idx + 3];
+      let isForeground = false;
+      if (stats.hasAlphaBackdrop) {
+        isForeground = a >= 24;
+      } else if (a >= 24) {
+        const r = data[idx];
+        const g = data[idx + 1];
+        const b = data[idx + 2];
+        const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+        const pxLab = rgbToLab(r, g, b);
+        if (
+          deltaELab(pxLab, stats.bgLab) > stats.deltaEThreshold ||
+          lum > lumCeiling
+        ) {
+          isForeground = true;
+        }
+      }
+
+      if (isForeground) {
+        rowCounts[y]++;
+        colCounts[x]++;
+      }
+    }
+  }
+
+  const minRowHits = Math.max(2, Math.floor(w * 0.005));
+  const minColHits = Math.max(2, Math.floor(h * 0.005));
+
+  let minX = w;
+  let maxX = -1;
+  let minY = h;
+  let maxY = -1;
+
+  for (let x = 0; x < w; x++) {
+    if (colCounts[x] >= minColHits) {
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+    }
+  }
+  for (let y = 0; y < h; y++) {
+    if (rowCounts[y] >= minRowHits) {
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+
+  if (maxX < minX || maxY < minY) {
+    minX = w;
+    maxX = -1;
+    minY = h;
+    maxY = -1;
+    for (let x = 0; x < w; x++) {
+      if (colCounts[x] >= 1) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+      }
+    }
+    for (let y = 0; y < h; y++) {
+      if (rowCounts[y] >= 1) {
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+
+  const detectedSubjectFound =
+    maxX > minX &&
+    maxY > minY &&
+    (maxX - minX + 1) * (maxY - minY + 1) > w * h * 0.015;
+
+  return { minX, maxX, minY, maxY, detectedSubjectFound };
+}
+
+export function evaluateWhiteningSafety(
+  beforeData: Uint8ClampedArray,
+  afterData: Uint8ClampedArray,
+  productMask: Uint8Array
+): WhiteningSafetyResult {
+  let maskPixelCount = 0;
+  let changedPixelCount = 0;
+
+  for (let p = 0; p < productMask.length; p++) {
+    if (!productMask[p]) continue;
+    maskPixelCount++;
+    const idx = p * 4;
+
+    const aBefore = beforeData[idx + 3] / 255;
+    const rB = beforeData[idx] * aBefore + 255 * (1 - aBefore);
+    const gB = beforeData[idx + 1] * aBefore + 255 * (1 - aBefore);
+    const bB = beforeData[idx + 2] * aBefore + 255 * (1 - aBefore);
+    const lumBefore = 0.299 * rB + 0.587 * gB + 0.114 * bB;
+
+    const aAfter = afterData[idx + 3] / 255;
+    const rA = afterData[idx] * aAfter + 255 * (1 - aAfter);
+    const gA = afterData[idx + 1] * aAfter + 255 * (1 - aAfter);
+    const bA = afterData[idx + 2] * aAfter + 255 * (1 - aAfter);
+    const lumAfter = 0.299 * rA + 0.587 * gA + 0.114 * bA;
+
+    if (Math.abs(lumAfter - lumBefore) >= 12) {
+      changedPixelCount++;
+    }
+  }
+
+  const changedRatio =
+    maskPixelCount > 0 ? changedPixelCount / maskPixelCount : 0;
+  const aborted = changedRatio > 0.02;
+
+  return {
+    aborted,
+    maskPixelCount,
+    changedPixelCount,
+    changedRatio,
+    note: aborted ? LIGHT_PRODUCT_SKIP_NOTE : undefined,
+  };
+}
+
+/**
+ * Pure canvas-free whitening pass safe for white/silver/light products:
+ * 1) Border flood fill + protected productMask & productBbox first.
+ * 2) Enclosed interior void whitening ONLY for regions surrounded by product pixels
+ *    with area < 3% of productBbox and tightly matching the backdrop.
+ * 3) Contact shadow normalization ONLY within 6% of frame height below product bottom,
+ *    horizontally within productBbox +/- 8%, and connected to the flood-filled background.
+ * 4) Safety check: if > 2% of productMask pixels change luminance by >= 12, abort whitening,
+ *    restore the original crop bytes, and return LIGHT_PRODUCT_SKIP_NOTE.
+ */
+export function processCropWhitening(
+  input: CropWhiteningInput
+): CropWhiteningOutput {
+  const {
+    data,
+    width,
+    height,
+    fullFrameHeight,
+    bgR,
+    bgG,
+    bgB,
+    minBorderLum,
+    maxBorderLum,
+    p90DeltaE,
+    deltaEThreshold,
+    flattenLightBgToWhite,
+    beforeSafetyCheck,
+  } = input;
+
+  const totalPx = width * height;
+  const borderBgMask = new Uint8Array(totalPx);
+  const productMask = new Uint8Array(totalPx);
+  const interiorVoidMask = new Uint8Array(totalPx);
+  const contactShadowMask = new Uint8Array(totalPx);
+
+  const bgLab = rgbToLab(bgR, bgG, bgB);
+  const bgLuminance = 0.299 * bgR + 0.587 * bgG + 0.114 * bgB;
+  const featherPx =
+    input.featherPx ?? clamp(Math.round(Math.min(width, height) * 0.02), 3, 14);
+
+  if (!flattenLightBgToWhite) {
+    for (let y = 0; y < height; y++) {
+      const edgeDistY = Math.min(y, height - 1 - y);
+      for (let x = 0; x < width; x++) {
+        const edgeDistX = Math.min(x, width - 1 - x);
+        const edgeDist = Math.min(edgeDistX, edgeDistY);
+        if (edgeDist >= featherPx) continue;
+        const idx = (y * width + x) * 4;
+        const pxDelta = deltaELab(
+          rgbToLab(data[idx], data[idx + 1], data[idx + 2]),
+          bgLab
+        );
+        if (pxDelta <= deltaEThreshold + 4) {
+          const t = edgeDist / featherPx;
+          data[idx + 3] = Math.round(data[idx + 3] * t);
+        }
+      }
+    }
+
+    return {
+      whiteningApplied: false,
+      whiteningSkippedForLightProduct: false,
+      productMask,
+      borderBgMask,
+      interiorVoidMask,
+      contactShadowMask,
+      productBbox: { minX: 0, maxX: -1, minY: 0, maxY: -1, found: false },
+      safety: {
+        aborted: false,
+        maskPixelCount: 0,
+        changedPixelCount: 0,
+        changedRatio: 0,
+      },
+    };
+  }
+
+  const beforeData = new Uint8ClampedArray(data);
+  const lumCeiling = Math.min(
+    255,
+    Math.max(bgLuminance + 3, maxBorderLum + 3)
+  );
+  const lumFloor = Math.max(
+    192,
+    minBorderLum - Math.max(6, Math.round(p90DeltaE * 4))
+  );
+  const floodDeltaLimit = clamp(
+    Math.max(4.2, p90DeltaE + 2.5),
+    4.2,
+    Math.max(deltaEThreshold, 13)
+  );
+
+  // Step 1a: Flood fill connected backdrop from all 4 crop borders
+  const visited = new Uint8Array(totalPx);
+  const queue = new Int32Array(totalPx);
+  let qHead = 0;
+  let qTail = 0;
+
+  const isBorderBgPixel = (offset: number): boolean => {
+    const a = data[offset + 3];
+    if (a < 235) return true;
+    const r = data[offset];
+    const g = data[offset + 1];
+    const b = data[offset + 2];
+    const spread = Math.max(r, g, b) - Math.min(r, g, b);
+    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+    if (lum < lumFloor || lum > lumCeiling || spread > 30) return false;
+    const pxDelta = deltaELab(rgbToLab(r, g, b), bgLab);
+    return pxDelta <= floodDeltaLimit;
+  };
+
+  const tryEnqueueBorder = (x: number, y: number) => {
+    const p = y * width + x;
+    if (visited[p]) return;
+    visited[p] = 1;
+    if (isBorderBgPixel(p * 4)) {
+      borderBgMask[p] = 1;
+      queue[qTail++] = p;
+    }
+  };
+
+  for (let x = 0; x < width; x++) {
+    tryEnqueueBorder(x, 0);
+    tryEnqueueBorder(x, height - 1);
+  }
+  for (let y = 1; y < height - 1; y++) {
+    tryEnqueueBorder(0, y);
+    tryEnqueueBorder(width - 1, y);
+  }
+
+  while (qHead < qTail) {
+    const p = queue[qHead++];
+    const x = p % width;
+    const y = (p - x) / width;
+    if (x > 0) tryEnqueueBorder(x - 1, y);
+    if (x < width - 1) tryEnqueueBorder(x + 1, y);
+    if (y > 0) tryEnqueueBorder(x, y - 1);
+    if (y < height - 1) tryEnqueueBorder(x, y + 1);
+  }
+
+  const tightlyMatchesBackdrop = (offset: number): boolean => {
+    const a = data[offset + 3];
+    if (a < 235) return true;
+    const r = data[offset];
+    const g = data[offset + 1];
+    const b = data[offset + 2];
+    const spread = Math.max(r, g, b) - Math.min(r, g, b);
+    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+    const maxDiff = Math.max(
+      Math.abs(r - bgR),
+      Math.abs(g - bgG),
+      Math.abs(b - bgB)
+    );
+    if (spread > 12 || maxDiff > 5 || lum > lumCeiling || lum < lumFloor) {
+      return false;
+    }
+    const pxDelta = deltaELab(rgbToLab(r, g, b), bgLab);
+    return pxDelta <= 3.5;
+  };
+
+  // Step 1b: Compute core product bounds (excluding soft neutral bottom shadow skirt)
+  const coreProductMask = new Uint8Array(totalPx);
+  let coreMinX = width;
+  let coreMaxX = -1;
+  let coreMinY = height;
+  let coreMaxY = -1;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const p = y * width + x;
+      if (borderBgMask[p]) continue;
+      const idx = p * 4;
+      if (data[idx + 3] < 24) continue;
+      const r = data[idx];
+      const g = data[idx + 1];
+      const b = data[idx + 2];
+      const spread = Math.max(r, g, b) - Math.min(r, g, b);
+      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+      const pxDelta = deltaELab(rgbToLab(r, g, b), bgLab);
+      if (pxDelta > deltaEThreshold || lum > lumCeiling || spread > 12) {
+        coreProductMask[p] = 1;
+        if (x < coreMinX) coreMinX = x;
+        if (x > coreMaxX) coreMaxX = x;
+        if (y < coreMinY) coreMinY = y;
+        if (y > coreMaxY) coreMaxY = y;
+      }
+    }
+  }
+  const hasCoreBox = coreMaxX >= coreMinX && coreMaxY >= coreMinY;
+
+  // Step 1c: Build protected productMask & initial productBbox
+  let prodMinX = width;
+  let prodMaxX = -1;
+  let prodMinY = height;
+  let prodMaxY = -1;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const p = y * width + x;
+      if (borderBgMask[p]) continue;
+      const idx = p * 4;
+      if (data[idx + 3] < 24) continue;
+
+      if (coreProductMask[p]) {
+        productMask[p] = 1;
+      } else if (!tightlyMatchesBackdrop(idx)) {
+        const r = data[idx];
+        const g = data[idx + 1];
+        const b = data[idx + 2];
+        const spread = Math.max(r, g, b) - Math.min(r, g, b);
+        const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+        const pxDelta = deltaELab(rgbToLab(r, g, b), bgLab);
+        const isBelowShadowSkirt =
+          hasCoreBox &&
+          y > coreMaxY &&
+          spread <= 4 &&
+          pxDelta <= deltaEThreshold &&
+          lum < bgLuminance;
+        if (!isBelowShadowSkirt) {
+          productMask[p] = 1;
+        }
+      }
+
+      if (productMask[p]) {
+        if (x < prodMinX) prodMinX = x;
+        if (x > prodMaxX) prodMaxX = x;
+        if (y < prodMinY) prodMinY = y;
+        if (y > prodMaxY) prodMaxY = y;
+      }
+    }
+  }
+
+  let hasProductBbox = prodMaxX >= prodMinX && prodMaxY >= prodMinY;
+  const prodBboxW = hasProductBbox ? prodMaxX - prodMinX + 1 : 0;
+  const prodBboxH = hasProductBbox ? prodMaxY - prodMinY + 1 : 0;
+  const prodBboxArea = prodBboxW * prodBboxH;
+
+  // Step 2: Interior void whitening (< 3% of productBbox, fully enclosed by productMask)
+  const compVisited = new Uint8Array(totalPx);
+  const compQueue = new Int32Array(totalPx);
+
+  for (let start = 0; start < totalPx; start++) {
+    if (borderBgMask[start] || productMask[start] || compVisited[start]) {
+      continue;
+    }
+
+    let cHead = 0;
+    let cTail = 0;
+    compVisited[start] = 1;
+    compQueue[cTail++] = start;
+
+    let touchesCropBorder = false;
+    let touchesBorderBg = false;
+    let allTightlyMatchBackdrop = true;
+
+    while (cHead < cTail) {
+      const p = compQueue[cHead++];
+      const x = p % width;
+      const y = (p - x) / width;
+
+      if (x === 0 || x === width - 1 || y === 0 || y === height - 1) {
+        touchesCropBorder = true;
+      }
+      if (!tightlyMatchesBackdrop(p * 4)) {
+        allTightlyMatchBackdrop = false;
+      }
+
+      const neighbors = [
+        x > 0 ? p - 1 : -1,
+        x < width - 1 ? p + 1 : -1,
+        y > 0 ? p - width : -1,
+        y < height - 1 ? p + width : -1,
+      ];
+
+      for (let i = 0; i < 4; i++) {
+        const nb = neighbors[i];
+        if (nb < 0) continue;
+        if (borderBgMask[nb]) {
+          touchesBorderBg = true;
+        } else if (!productMask[nb]) {
+          if (!compVisited[nb]) {
+            compVisited[nb] = 1;
+            compQueue[cTail++] = nb;
+          }
+        }
+      }
+    }
+
+    const enclosedByProduct =
+      hasProductBbox && !touchesCropBorder && !touchesBorderBg;
+
+    if (
+      enclosedByProduct &&
+      allTightlyMatchBackdrop &&
+      cTail < prodBboxArea * 0.03
+    ) {
+      for (let i = 0; i < cTail; i++) {
+        interiorVoidMask[compQueue[i]] = 1;
+      }
+    } else if (enclosedByProduct) {
+      // Large (>= 3%) or non-backdrop region inside product body -> protect in productMask
+      for (let i = 0; i < cTail; i++) {
+        const p = compQueue[i];
+        productMask[p] = 1;
+        const x = p % width;
+        const y = (p - x) / width;
+        if (x < prodMinX) prodMinX = x;
+        if (x > prodMaxX) prodMaxX = x;
+        if (y < prodMinY) prodMinY = y;
+        if (y > prodMaxY) prodMaxY = y;
+      }
+      hasProductBbox = prodMaxX >= prodMinX && prodMaxY >= prodMinY;
+    }
+  }
+
+  // Step 3: Contact shadow normalization strictly below productBbox
+  if (hasProductBbox && bgLuminance < 252) {
+    const shadowMinY = prodMaxY + 1;
+    const shadowMaxY = Math.min(
+      height - 1,
+      prodMaxY + Math.ceil(fullFrameHeight * 0.06)
+    );
+    const horizPad = Math.round(prodBboxW * 0.08);
+    const shadowMinX = Math.max(0, prodMinX - horizPad);
+    const shadowMaxX = Math.min(width - 1, prodMaxX + horizPad);
+
+    if (shadowMinY <= shadowMaxY && shadowMinX <= shadowMaxX) {
+      const isShadowCandidate = (p: number): boolean => {
+        if (productMask[p] || borderBgMask[p] || interiorVoidMask[p]) {
+          return false;
+        }
+        const x = p % width;
+        const y = (p - x) / width;
+        if (
+          y < shadowMinY ||
+          y > shadowMaxY ||
+          x < shadowMinX ||
+          x > shadowMaxX
+        ) {
+          return false;
+        }
+        const idx = p * 4;
+        const r = data[idx];
+        const g = data[idx + 1];
+        const b = data[idx + 2];
+        const spread = Math.max(r, g, b) - Math.min(r, g, b);
+        const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+        return spread <= 22 && lum > bgLuminance - 60 && lum < bgLuminance + 8;
+      };
+
+      const sQueue = new Int32Array(totalPx);
+      let sHead = 0;
+      let sTail = 0;
+
+      for (let y = shadowMinY; y <= shadowMaxY; y++) {
+        for (let x = shadowMinX; x <= shadowMaxX; x++) {
+          const p = y * width + x;
+          if (!isShadowCandidate(p)) continue;
+          const touchesBg =
+            (x > 0 && borderBgMask[p - 1]) ||
+            (x < width - 1 && borderBgMask[p + 1]) ||
+            (y > 0 && borderBgMask[p - width]) ||
+            (y < height - 1 && borderBgMask[p + width]);
+          if (touchesBg) {
+            contactShadowMask[p] = 1;
+            sQueue[sTail++] = p;
+          }
+        }
+      }
+
+      while (sHead < sTail) {
+        const p = sQueue[sHead++];
+        const x = p % width;
+        const y = (p - x) / width;
+        const neighbors = [
+          x > shadowMinX ? p - 1 : -1,
+          x < shadowMaxX ? p + 1 : -1,
+          y > shadowMinY ? p - width : -1,
+          y < shadowMaxY ? p + width : -1,
+        ];
+        for (let i = 0; i < 4; i++) {
+          const nb = neighbors[i];
+          if (nb >= 0 && !contactShadowMask[nb] && isShadowCandidate(nb)) {
+            contactShadowMask[nb] = 1;
+            sQueue[sTail++] = nb;
+          }
+        }
+      }
+    }
+  }
+
+  // Apply whitening to borderBgMask, interiorVoidMask, and contactShadowMask only
+  // (never touching productMask pixels)
+  for (let p = 0; p < totalPx; p++) {
+    if (productMask[p]) continue;
+    const idx = p * 4;
+    if (borderBgMask[p] || interiorVoidMask[p]) {
+      data[idx] = 255;
+      data[idx + 1] = 255;
+      data[idx + 2] = 255;
+      data[idx + 3] = 255;
+    } else if (contactShadowMask[p]) {
+      const r = data[idx];
+      const g = data[idx + 1];
+      const b = data[idx + 2];
+      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+      const denom = Math.max(12, bgLuminance - 4);
+      const normalized = clamp(lum / denom, 0, 1);
+      const targetShadowLum =
+        lum + (255 - bgLuminance) * Math.pow(normalized, 1.3);
+      const deltaLum = Math.max(0, targetShadowLum - lum);
+      data[idx] = Math.min(255, Math.round(r + deltaLum));
+      data[idx + 1] = Math.min(255, Math.round(g + deltaLum));
+      data[idx + 2] = Math.min(255, Math.round(b + deltaLum));
+      data[idx + 3] = 255;
+    }
+  }
+
+  beforeSafetyCheck?.(data, productMask);
+
+  // Step 4: Safety check against protected productMask
+  const safety = evaluateWhiteningSafety(beforeData, data, productMask);
+  if (safety.aborted) {
+    data.set(beforeData);
+    return {
+      whiteningApplied: false,
+      whiteningSkippedForLightProduct: true,
+      whiteningSkippedNote: LIGHT_PRODUCT_SKIP_NOTE,
+      productMask,
+      borderBgMask,
+      interiorVoidMask,
+      contactShadowMask,
+      productBbox: {
+        minX: prodMinX,
+        maxX: prodMaxX,
+        minY: prodMinY,
+        maxY: prodMaxY,
+        found: hasProductBbox,
+      },
+      safety,
+    };
+  }
+
+  return {
+    whiteningApplied: true,
+    whiteningSkippedForLightProduct: false,
+    productMask,
+    borderBgMask,
+    interiorVoidMask,
+    contactShadowMask,
+    productBbox: {
+      minX: prodMinX,
+      maxX: prodMaxX,
+      minY: prodMinY,
+      maxY: prodMaxY,
+      found: hasProductBbox,
+    },
+    safety,
+  };
+}
+
 /**
  * Client-side auto-crop and object-centering engine.
  * Detects the product bounding box relative to sampled border color (Delta-E ~12),
- * flattens low-saturation light backgrounds (luminance >= 200) to #FFFFFF while keeping
- * soft contact shadows, and centers + scales to exact marketplace targets.
+ * flattens low-saturation light backgrounds (luminance >= 200) to #FFFFFF safely
+ * with protected product masks, enclosed <3% handle-void whitening, bounded contact-shadow
+ * normalization, and >2% luminance safety abort.
  */
 export async function autoCropAndCenterImage(
   sourceDataUrl: string,
@@ -147,138 +905,26 @@ export async function autoCropAndCenterImage(
   actx.drawImage(img, 0, 0, aw, ah);
   const { data } = actx.getImageData(0, 0, aw, ah);
 
-  const borderMargin = Math.max(4, Math.round(Math.min(aw, ah) * 0.03));
-  const cornerSize = Math.max(8, Math.round(Math.min(aw, ah) * 0.06));
-  const borderR: number[] = [];
-  const borderG: number[] = [];
-  const borderB: number[] = [];
-  let borderTotal = 0;
-  let borderTransparent = 0;
+  const borderStats = sampleBorderBackdrop(data, aw, ah);
+  const {
+    hasAlphaBackdrop,
+    bgR,
+    bgG,
+    bgB,
+    minBorderLum,
+    maxBorderLum,
+    p90DeltaE,
+    deltaEThreshold,
+    isLowSatLightBg,
+  } = borderStats;
 
-  for (let y = 0; y < ah; y++) {
-    for (let x = 0; x < aw; x++) {
-      const isEdgeStrip =
-        x < borderMargin ||
-        x >= aw - borderMargin ||
-        y < borderMargin ||
-        y >= ah - borderMargin;
-      const isCorner =
-        (x < cornerSize || x >= aw - cornerSize) &&
-        (y < cornerSize || y >= ah - cornerSize);
-      if (!isEdgeStrip && !isCorner) continue;
-
-      const idx = (y * aw + x) * 4;
-      const a = data[idx + 3];
-      borderTotal++;
-      if (a < 235) {
-        borderTransparent++;
-      } else {
-        borderR.push(data[idx]);
-        borderG.push(data[idx + 1]);
-        borderB.push(data[idx + 2]);
-      }
-    }
-  }
-
-  const hasAlphaBackdrop =
-    borderTotal > 0 && borderTransparent / borderTotal > 0.2;
-
-  const bgR = borderR.length > 0 ? median(borderR) : 255;
-  const bgG = borderG.length > 0 ? median(borderG) : 255;
-  const bgB = borderB.length > 0 ? median(borderB) : 255;
-  const bgLuminance = 0.299 * bgR + 0.587 * bgG + 0.114 * bgB;
-  const bgSpread = Math.max(bgR, bgG, bgB) - Math.min(bgR, bgG, bgB);
-  const bgLab = rgbToLab(bgR, bgG, bgB);
-
-  const isLowSatLightBg =
-    !hasAlphaBackdrop && bgLuminance >= 200 && bgSpread <= 28;
   const flattenLightBgToWhite =
     isLowSatLightBg &&
     (options.backdropMode === 'pure-white' ||
       Boolean(options.flattenLightBackground));
 
-  // Estimate subtle gradient / compression noise on the border in Lab Delta-E
-  const borderDeltaEs: number[] = [];
-  for (let i = 0; i < borderR.length; i++) {
-    borderDeltaEs.push(deltaELab(rgbToLab(borderR[i], borderG[i], borderB[i]), bgLab));
-  }
-  borderDeltaEs.sort((a, b) => a - b);
-  const p90DeltaE =
-    borderDeltaEs.length > 0
-      ? borderDeltaEs[Math.floor(borderDeltaEs.length * 0.9)]
-      : 4;
-  const deltaEThreshold = clamp(Math.max(12, p90DeltaE + 3), 12, 18);
-
-  // Build row/col occupancy counts using Delta-E from sampled background
-  const rowCounts = new Int32Array(ah);
-  const colCounts = new Int32Array(aw);
-
-  for (let y = 0; y < ah; y++) {
-    for (let x = 0; x < aw; x++) {
-      const idx = (y * aw + x) * 4;
-      const a = data[idx + 3];
-      let isForeground = false;
-      if (hasAlphaBackdrop) {
-        isForeground = a >= 24;
-      } else if (a >= 24) {
-        const pxLab = rgbToLab(data[idx], data[idx + 1], data[idx + 2]);
-        if (deltaELab(pxLab, bgLab) > deltaEThreshold) {
-          isForeground = true;
-        }
-      }
-
-      if (isForeground) {
-        rowCounts[y]++;
-        colCounts[x]++;
-      }
-    }
-  }
-
-  const minRowHits = Math.max(2, Math.floor(aw * 0.005));
-  const minColHits = Math.max(2, Math.floor(ah * 0.005));
-
-  let minX = aw;
-  let maxX = -1;
-  let minY = ah;
-  let maxY = -1;
-
-  for (let x = 0; x < aw; x++) {
-    if (colCounts[x] >= minColHits) {
-      if (x < minX) minX = x;
-      if (x > maxX) maxX = x;
-    }
-  }
-  for (let y = 0; y < ah; y++) {
-    if (rowCounts[y] >= minRowHits) {
-      if (y < minY) minY = y;
-      if (y > maxY) maxY = y;
-    }
-  }
-
-  // Fallback to single-pixel hits if product is super thin
-  if (maxX < minX || maxY < minY) {
-    minX = aw;
-    maxX = -1;
-    minY = ah;
-    maxY = -1;
-    for (let x = 0; x < aw; x++) {
-      if (colCounts[x] >= 1) {
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-      }
-    }
-    for (let y = 0; y < ah; y++) {
-      if (rowCounts[y] >= 1) {
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-      }
-    }
-  }
-
-  const detectedSubjectFound =
-    maxX > minX &&
-    maxY > minY &&
-    (maxX - minX + 1) * (maxY - minY + 1) > aw * ah * 0.015;
+  const { minX, maxX, minY, maxY, detectedSubjectFound } =
+    findSubjectBoundsFromBuffer(data, aw, ah, borderStats);
 
   // Convert back to full-res box with 2px safety bleed
   const bleed = Math.max(2, Math.round(Math.max(fullW, fullH) * 0.004));
@@ -315,8 +961,7 @@ export async function autoCropAndCenterImage(
   const destX = Math.round((outW - destW) / 2);
   const destY = Math.round((outH - destH) / 2);
 
-  // 3. Extract cropped region onto scratch canvas, whiten connected low-sat light background
-  //    to #FFFFFF while keeping soft contact shadow beneath the product intact.
+  // 3. Extract cropped region onto scratch canvas and run safe whitening
   const cropCanvas = document.createElement('canvas');
   cropCanvas.width = srcW;
   cropCanvas.height = srcH;
@@ -327,138 +972,23 @@ export async function autoCropAndCenterImage(
   cctx.clearRect(0, 0, srcW, srcH);
   cctx.drawImage(img, srcX, srcY, srcW, srcH, 0, 0, srcW, srcH);
 
+  let whiteningOutput: CropWhiteningOutput | null = null;
   if (!hasAlphaBackdrop) {
     const cropImg = cctx.getImageData(0, 0, srcW, srcH);
-    const cd = cropImg.data;
-    const featherPx = clamp(Math.round(Math.min(srcW, srcH) * 0.02), 3, 14);
-
-    if (flattenLightBgToWhite) {
-      // Flood-fill from the crop perimeter across low-saturation light background pixels
-      // so interior white highlights on white products are untouched while background becomes #FFFFFF.
-      const totalPx = srcW * srcH;
-      const visited = new Uint8Array(totalPx);
-      const isBgSeed = new Uint8Array(totalPx);
-      const queue = new Int32Array(totalPx);
-      let qHead = 0;
-      let qTail = 0;
-
-      const isBackgroundPixel = (offset: number): boolean => {
-        const r = cd[offset];
-        const g = cd[offset + 1];
-        const b = cd[offset + 2];
-        const spread = Math.max(r, g, b) - Math.min(r, g, b);
-        const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-        if (lum < 192 || spread > 30) return false;
-        const pxDelta = deltaELab(rgbToLab(r, g, b), bgLab);
-        return pxDelta <= Math.max(deltaEThreshold, 13);
-      };
-
-      const tryEnqueue = (x: number, y: number) => {
-        const p = y * srcW + x;
-        if (visited[p]) return;
-        visited[p] = 1;
-        if (isBackgroundPixel(p * 4)) {
-          isBgSeed[p] = 1;
-          queue[qTail++] = p;
-        }
-      };
-
-      for (let x = 0; x < srcW; x++) {
-        tryEnqueue(x, 0);
-        tryEnqueue(x, srcH - 1);
-      }
-      for (let y = 1; y < srcH - 1; y++) {
-        tryEnqueue(0, y);
-        tryEnqueue(srcW - 1, y);
-      }
-
-      while (qHead < qTail) {
-        const p = queue[qHead++];
-        const x = p % srcW;
-        const y = (p - x) / srcW;
-        if (x > 0) tryEnqueue(x - 1, y);
-        if (x < srcW - 1) tryEnqueue(x + 1, y);
-        if (y > 0) tryEnqueue(x, y - 1);
-        if (y < srcH - 1) tryEnqueue(x, y + 1);
-      }
-
-      // Flatten connected background AND smoothly feather low-saturation contact shadow transitions into #FFFFFF
-      for (let y = 0; y < srcH; y++) {
-        const edgeDistY = Math.min(y, srcH - 1 - y);
-        for (let x = 0; x < srcW; x++) {
-          const edgeDistX = Math.min(x, srcW - 1 - x);
-          const edgeDist = Math.min(edgeDistX, edgeDistY);
-          const p = y * srcW + x;
-          const idx = p * 4;
-          const r = cd[idx];
-          const g = cd[idx + 1];
-          const b = cd[idx + 2];
-
-          if (isBgSeed[p]) {
-            cd[idx] = 255;
-            cd[idx + 1] = 255;
-            cd[idx + 2] = 255;
-            cd[idx + 3] = 0;
-            continue;
-          }
-
-          const spread = Math.max(r, g, b) - Math.min(r, g, b);
-          const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-          const pxDelta = deltaELab(rgbToLab(r, g, b), bgLab);
-
-          // Closed interior background voids (e.g. inside handles) matching border color tightly
-          if (
-            pxDelta <= 8 &&
-            spread <= 20 &&
-            lum >= 198 &&
-            Math.abs(lum - bgLuminance) <= 10
-          ) {
-            cd[idx] = 255;
-            cd[idx + 1] = 255;
-            cd[idx + 2] = 255;
-            cd[idx + 3] = 0;
-            continue;
-          }
-
-          // Preserve soft contact shadow while normalizing neutral shadow tail smoothly toward #FFFFFF
-          if (
-            y >= srcH * 0.55 &&
-            spread <= 22 &&
-            lum > bgLuminance - 60 &&
-            lum < bgLuminance + 8 &&
-            bgLuminance < 252
-          ) {
-            // Remap neutral shadow luminance linearly from [bgLum-60..bgLum] -> [lum..255]
-            const denom = Math.max(12, bgLuminance - 4);
-            const normalized = clamp(lum / denom, 0, 1);
-            const targetShadowLum = lum + (255 - bgLuminance) * Math.pow(normalized, 1.3);
-            const deltaLum = Math.max(0, targetShadowLum - lum);
-            cd[idx] = Math.min(255, Math.round(r + deltaLum));
-            cd[idx + 1] = Math.min(255, Math.round(g + deltaLum));
-            cd[idx + 2] = Math.min(255, Math.round(b + deltaLum));
-          } else if (edgeDist < featherPx && pxDelta <= deltaEThreshold + 6) {
-            const t = edgeDist / featherPx;
-            cd[idx + 3] = Math.round(cd[idx + 3] * t);
-          }
-        }
-      }
-    } else {
-      for (let y = 0; y < srcH; y++) {
-        const edgeDistY = Math.min(y, srcH - 1 - y);
-        for (let x = 0; x < srcW; x++) {
-          const edgeDistX = Math.min(x, srcW - 1 - x);
-          const edgeDist = Math.min(edgeDistX, edgeDistY);
-          const idx = (y * srcW + x) * 4;
-          const pxDelta = deltaELab(rgbToLab(cd[idx], cd[idx + 1], cd[idx + 2]), bgLab);
-
-          if (edgeDist < featherPx && pxDelta <= deltaEThreshold + 4) {
-            const t = edgeDist / featherPx;
-            cd[idx + 3] = Math.round(cd[idx + 3] * t);
-          }
-        }
-      }
-    }
-
+    whiteningOutput = processCropWhitening({
+      data: cropImg.data,
+      width: srcW,
+      height: srcH,
+      fullFrameHeight: fullH,
+      bgR,
+      bgG,
+      bgB,
+      minBorderLum,
+      maxBorderLum,
+      p90DeltaE,
+      deltaEThreshold,
+      flattenLightBgToWhite,
+    });
     cctx.putImageData(cropImg, 0, 0);
   }
 
@@ -471,8 +1001,12 @@ export async function autoCropAndCenterImage(
     throw new Error('Output canvas context unavailable');
   }
 
+  const whiteningSkipped = Boolean(
+    whiteningOutput?.whiteningSkippedForLightProduct
+  );
   const useWhiteCanvas =
-    options.backdropMode === 'pure-white' || flattenLightBgToWhite;
+    !whiteningSkipped &&
+    (options.backdropMode === 'pure-white' || flattenLightBgToWhite);
   octx.fillStyle = useWhiteCanvas
     ? '#FFFFFF'
     : `rgb(${bgR}, ${bgG}, ${bgB})`;
@@ -502,6 +1036,7 @@ export async function autoCropAndCenterImage(
       height: srcH,
     },
     appliedFillPercent,
+    whiteningSkippedNote: whiteningOutput?.whiteningSkippedNote,
   };
 }
 
